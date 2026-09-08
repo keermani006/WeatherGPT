@@ -1,0 +1,30 @@
+# Root-level ignores
+weathergpt/          # raw working copy — backend/ is the canonical source
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets — NEVER commit
+.env
+
+# IDE / OS
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
