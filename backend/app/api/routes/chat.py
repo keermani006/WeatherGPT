@@ -1,18 +1,15 @@
 """
 app/api/routes/chat.py
 
-POST /api/v1/chat — the Phase 1 endpoint.
+POST /api/v1/chat
 
 Request flow:
-  1. Validate request (Pydantic / FastAPI).
+  1. Validate request (Pydantic / FastAPI — max_length=1000 enforced on message).
   2. Guardrail check — reject non-weather messages immediately with 403.
-  3. Resolve location:
-     - Priority 1: Explicit location in body.location or in message -> Nominatim geocoding.
-     - Priority 2: Browser GPS coordinates (latitude, longitude) -> Nominatim reverse geocode.
-     - Priority 3: Neither provided -> return polite prompt asking user for location.
-  4. Detect whether the question is about tomorrow's forecast.
-  5. Fetch weather data from Open-Meteo for the resolved coordinates.
-  6. Ask Groq LLM to explain the retrieved weather data.
+  3. Resolve location (explicit → extracted from message → GPS coordinates).
+  4. Detect tomorrow question.
+  5. Fetch weather from Open-Meteo (cached, with retry).
+  6. Ask Groq LLM to explain the weather (with circuit breaker + fallback).
   7. Return structured ChatResponse.
 """
 
@@ -21,13 +18,18 @@ import time
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from app.core.config import get_settings
+from app.core.limiter import limiter
+from app.core.resilience import ServiceUnavailableError
 from app.schemas.chat import ChatRequest, ChatResponse, WeatherData
 from app.services.llm_service import generate_weather_response
 from app.services.location_service import resolve_location
 from app.services.weather_service import get_weather
 from app.utils.weather_guardrail import is_weather_related
+
+settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
@@ -66,22 +68,24 @@ def _build_fallback_answer(weather_data: WeatherData) -> str:
     response_model=ChatResponse,
     summary="Send a weather question",
     description=(
-        "Send a natural-language weather question. "
+        "Send a natural-language weather question (max 1000 characters). "
         "The backend resolves location (via query place name or browser GPS), "
         "fetches live weather data from Open-Meteo, "
         "and uses Groq LLM to produce a conversational answer. "
-        "Non-weather questions are rejected immediately."
+        "Non-weather questions are rejected immediately with 403."
     ),
     responses={
         200: {"description": "Successful weather answer or location prompt."},
         400: {"description": "Empty or invalid message."},
         403: {"description": "Question is not weather-related."},
         404: {"description": "Location not found."},
+        429: {"description": "Rate limit exceeded."},
         502: {"description": "Upstream API error (Open-Meteo / Nominatim / Groq)."},
         503: {"description": "Upstream API temporarily unavailable (timeout)."},
     },
 )
-async def chat(body: ChatRequest) -> ChatResponse:
+@limiter.limit(settings.rate_limit_chat)
+async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     """Handle a single user weather question end-to-end."""
     start = time.perf_counter()
     logger.info("Request received | message='%s' | location='%s' | coords=(%s, %s)",

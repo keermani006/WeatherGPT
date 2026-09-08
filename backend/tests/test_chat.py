@@ -435,6 +435,14 @@ class TestChatEndpoint:
         resp = self._post({"message": "Weather here?", "latitude": 13.0, "longitude": -200.0})
         assert resp.status_code == 422
 
+    def test_message_too_long_returns_422(self):
+        resp = self._post({"message": "w" * 1001})
+        assert resp.status_code == 422
+
+    def test_location_too_long_returns_422(self):
+        resp = self._post({"message": "Weather?", "location": "x" * 201})
+        assert resp.status_code == 422
+
     # ── Test 11: Health check (200) ──────────────────────────────────────────
 
     def test_healthz_returns_200(self):

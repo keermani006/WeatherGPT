@@ -60,6 +60,9 @@ class AlertResponse(BaseModel):
     """Schema representing an alert stored in database or memory."""
 
     id: str = Field(description="Unique alert identifier.")
+    user_id: Optional[str] = Field(
+        default=None, description="UUID of the owning authenticated user."
+    )
     latitude: float = Field(description="Latitude for the alert location.")
     longitude: float = Field(description="Longitude for the alert location.")
     condition: str = Field(description="Metric being monitored.")

@@ -12,32 +12,38 @@ This document defines the complete API contract for the WeatherGPT Phase 1 backe
 
 ### Technology Stack & Architecture
 - **Backend Framework**: FastAPI (Python 3.13) with asynchronous request pipelines.
+- **Authentication**: Supabase Auth JWT verification (HS256) on protected routes.
+- **Caching**: Multi-tiered in-memory TTL caching with single-flight request coalescing.
+- **Resilience**: Upstream retry with exponential backoff & sliding-window Circuit Breakers.
+- **Rate Limiting**: IP-based rate limiting via SlowAPI (in-memory sliding window).
+- **Security Middleware**: Automatic `X-Request-ID` tracing & OWASP security headers.
 - **Weather Provider**: [Open-Meteo](https://open-meteo.com) (free tier, no API key required).
 - **Climate Provider**: [Open-Meteo Climate API](https://climate-api.open-meteo.com) (CMIP6 climate models).
 - **Geocoding & Reverse Geocoding**: [Nominatim / OpenStreetMap](https://nominatim.openstreetmap.org).
 - **User Coordinates**: Browser Geolocation API (`navigator.geolocation.getCurrentPosition`).
-- **AI / LLM Engine**: [Groq API](https://console.groq.com) (`llama-3.3-70b-versatile`).
-- **Alert Persistence**: [Supabase](https://supabase.com) (PostgreSQL) with in-memory fallback.
-- **Alert Scheduler**: Lightweight async lifespan background scheduler with configurable interval.
-- **CORS**: Configured via `CORS_ORIGINS` (defaults to local origins; `*` supported in dev).
+- **AI / LLM Engine**: [Groq API](https://console.groq.com) (`qwen/qwen3.8-27b`).
+- **Alert Persistence**: [Supabase](https://supabase.com) (PostgreSQL) with Row-Level Security (RLS) & in-memory fallback.
+- **Alert Scheduler**: Lightweight async lifespan background scheduler with overlap prevention.
+- **CORS**: Configured via `CORS_ORIGINS`.
 
 ---
 
 ## 2. Table of Endpoints
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | [`/health`](#1-get-health) | Service health check |
-| `GET` | [`/api/v1/weather/current`](#2-get-apiv1weathercurrent) | Current real-time weather conditions |
-| `GET` | [`/api/v1/weather/forecast`](#3-get-apiv1weatherforecast) | Multi-day daily forecast (1 to 16 days) |
-| `GET` | [`/api/v1/weather/hourly`](#4-get-apiv1weatherhourly) | 24-hour hourly forecast for a date |
-| `POST` | [`/api/v1/chat`](#5-post-apiv1chat) | Natural language weather assistant with Groq & Guardrails |
-| `GET` | [`/api/v1/location/search`](#6-get-apiv1locationsearch) | Search places & autocomplete to coordinates |
-| `POST` | [`/api/v1/alerts`](#7-post-apiv1alerts) | Create a weather threshold alert |
-| `GET` | [`/api/v1/alerts`](#8-get-apiv1alerts) | List all registered weather alerts with live trigger status |
-| `DELETE` | [`/api/v1/alerts/{alert_id}`](#9-delete-apiv1alertsalert_id) | Delete an alert by ID |
-| `POST` | [`/api/v1/alerts/evaluate`](#10-post-apiv1alertsevaluate) | Evaluate all active alerts immediately against real weather |
-| `GET` | [`/api/v1/climate`](#11-get-apiv1climate) | CMIP6 climate model projections, summaries & trends |
+| Method | Endpoint | Auth Required | Description |
+|---|---|---|---|
+| `GET` | [`/health`](#1-get-health) | No | Service liveness check |
+| `GET` | [`/health/ready`](#1b-get-healthready) | No | Service readiness probe (checks Supabase connectivity) |
+| `GET` | [`/api/v1/weather/current`](#2-get-apiv1weathercurrent) | No | Current real-time weather conditions (cached 5m) |
+| `GET` | [`/api/v1/weather/forecast`](#3-get-apiv1weatherforecast) | No | Multi-day daily forecast (1 to 16 days, cached 10m) |
+| `GET` | [`/api/v1/weather/hourly`](#4-get-apiv1weatherhourly) | No | 24-hour hourly forecast for a date (cached 5m) |
+| `POST` | [`/api/v1/chat`](#5-post-apiv1chat) | No | Natural language weather assistant (rate-limited 20/min) |
+| `GET` | [`/api/v1/location/search`](#6-get-apiv1locationsearch) | No | Search places & autocomplete to coordinates (cached 1h, 30/min) |
+| `POST` | [`/api/v1/alerts`](#7-post-apiv1alerts) | **Yes (Bearer JWT)** | Create a user-owned weather threshold alert (20/min) |
+| `GET` | [`/api/v1/alerts`](#8-get-apiv1alerts) | **Yes (Bearer JWT)** | List authenticated user's registered alerts with trigger status |
+| `DELETE` | [`/api/v1/alerts/{alert_id}`](#9-delete-apiv1alertsalert_id) | **Yes (Bearer JWT)** | Delete a user-owned alert by ID |
+| `POST` | [`/api/v1/alerts/evaluate`](#10-post-apiv1alertsevaluate) | No | Evaluate all active alerts immediately against real weather |
+| `GET` | [`/api/v1/climate`](#11-get-apiv1climate) | No | CMIP6 climate model projections, summaries & trends (cached 1h) |
 
 ---
 

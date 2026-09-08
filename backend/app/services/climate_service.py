@@ -2,14 +2,21 @@
 app/services/climate_service.py
 
 Service layer for querying the Open-Meteo Climate API (CMIP6 climate models).
-Calculates summary statistics, trends, and attaches dataset attribution.
+
+Phase 2 additions:
+  - TTL caching (1 hour — climate data is effectively static)
+  - Retry with exponential backoff
+  - Circuit breaker on climate API
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
+
 import httpx
 
+from app.core.cache import climate_cache, climate_key
 from app.core.config import get_settings
+from app.core.resilience import async_retry, cb_climate
 from app.schemas.climate import (
     ClimateDailyPoint,
     ClimateDataSource,
@@ -26,67 +33,44 @@ DEFAULT_CLIMATE_MODEL = "CMCC_CM2_VHR4"
 DEFAULT_START_DATE = "2025-01-01"
 DEFAULT_END_DATE = "2025-01-30"
 
+# Supported CMIP6 models accepted by Open-Meteo Climate API
+SUPPORTED_CLIMATE_MODELS = {
+    "CMCC_CM2_VHR4",
+    "FGOALS_f3_H",
+    "HiRAM_SIT_HR",
+    "MRI_AGCM3_2_S",
+    "EC_Earth3P_HR",
+    "MPI_ESM1_2_XR",
+    "NICAM16_8S",
+}
+
 
 def _calculate_summary(daily_points: List[ClimateDailyPoint]) -> ClimateSummary:
-    """Calculate average and total statistics across the period from actual data points."""
     temps = [p.temperature_mean for p in daily_points if p.temperature_mean is not None]
     precips = [p.precipitation for p in daily_points if p.precipitation is not None]
     humidities = [p.humidity for p in daily_points if p.humidity is not None]
     winds = [p.wind_speed for p in daily_points if p.wind_speed is not None]
-
-    avg_temp = round(sum(temps) / len(temps), 1) if temps else None
-    total_precip = round(sum(precips), 1) if precips else None
-    avg_humidity = round(sum(humidities) / len(humidities), 1) if humidities else None
-    avg_wind = round(sum(winds) / len(winds), 1) if winds else None
-
     return ClimateSummary(
-        average_temperature=avg_temp,
-        total_precipitation=total_precip,
-        average_humidity=avg_humidity,
-        average_wind_speed=avg_wind,
+        average_temperature=round(sum(temps) / len(temps), 1) if temps else None,
+        total_precipitation=round(sum(precips), 1) if precips else None,
+        average_humidity=round(sum(humidities) / len(humidities), 1) if humidities else None,
+        average_wind_speed=round(sum(winds) / len(winds), 1) if winds else None,
     )
 
 
 def _calculate_trend(daily_points: List[ClimateDailyPoint]) -> Optional[ClimateTrend]:
-    """
-    Calculate qualitative trend (increasing, decreasing, stable)
-    if there are at least 6 daily observations.
-    """
     temps = [p.temperature_mean for p in daily_points if p.temperature_mean is not None]
     precips = [p.precipitation for p in daily_points if p.precipitation is not None]
-
     if len(temps) < 6:
         return None
-
-    # Temperature trend: compare second half mean with first half mean
     mid = len(temps) // 2
-    first_half_t = sum(temps[:mid]) / mid
-    second_half_t = sum(temps[mid:]) / (len(temps) - mid)
-    diff_t = second_half_t - first_half_t
-
-    if diff_t > 0.5:
-        temp_trend = "increasing"
-    elif diff_t < -0.5:
-        temp_trend = "decreasing"
-    else:
-        temp_trend = "stable"
-
-    # Precipitation trend
-    first_half_p = sum(precips[:mid]) / mid
-    second_half_p = sum(precips[mid:]) / (len(precips) - mid)
-    diff_p = second_half_p - first_half_p
-
-    if diff_p > 0.5:
-        precip_trend = "increasing"
-    elif diff_p < -0.5:
-        precip_trend = "decreasing"
-    else:
-        precip_trend = "stable"
-
-    return ClimateTrend(
-        temperature=temp_trend,
-        precipitation=precip_trend,
-    )
+    diff_t = (sum(temps[mid:]) / (len(temps) - mid)) - (sum(temps[:mid]) / mid)
+    temp_trend = "increasing" if diff_t > 0.5 else ("decreasing" if diff_t < -0.5 else "stable")
+    precip_trend = "stable"
+    if len(precips) >= 6:
+        diff_p = (sum(precips[mid:]) / (len(precips) - mid)) - (sum(precips[:mid]) / mid)
+        precip_trend = "increasing" if diff_p > 0.5 else ("decreasing" if diff_p < -0.5 else "stable")
+    return ClimateTrend(temperature=temp_trend, precipitation=precip_trend)
 
 
 async def get_climate_data(
@@ -98,13 +82,18 @@ async def get_climate_data(
     model: Optional[str] = None,
 ) -> ClimateResponse:
     """
-    Fetch CMIP6 climate model projections from Open-Meteo Climate API.
-    Computes statistical summaries, trend detection, and attaches attribution.
+    Fetch CMIP6 climate projections from Open-Meteo Climate API.
+    Results cached for 1 hour (climate data is quasi-static).
     """
     settings = get_settings()
     selected_model = model or DEFAULT_CLIMATE_MODEL
     selected_start = start_date or DEFAULT_START_DATE
     selected_end = end_date or DEFAULT_END_DATE
+
+    cache_key = climate_key(latitude, longitude, selected_start, selected_end, selected_model)
+    cached = climate_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     endpoint = f"{settings.open_meteo_climate_url}/climate"
     params = {
@@ -123,19 +112,22 @@ async def get_climate_data(
         ),
     }
 
-    logger.info(
-        "Querying Open-Meteo Climate API: coords=(%.4f, %.4f), period=%s to %s, model=%s",
-        latitude,
-        longitude,
-        selected_start,
-        selected_end,
-        selected_model,
-    )
+    async def _do_request():
+        async with cb_climate:
+            async with httpx.AsyncClient(timeout=settings.weather_api_timeout) as client:
+                resp = await client.get(endpoint, params=params)
+                resp.raise_for_status()
+                return resp.json()
 
-    async with httpx.AsyncClient(timeout=settings.weather_api_timeout) as client:
-        response = await client.get(endpoint, params=params)
-        response.raise_for_status()
-        data = response.json()
+    logger.info(
+        "Querying Open-Meteo Climate API: (%.4f, %.4f), %s to %s, model=%s",
+        latitude, longitude, selected_start, selected_end, selected_model,
+    )
+    data = await async_retry(
+        _do_request,
+        max_attempts=settings.retry_max_attempts,
+        base_delay=settings.retry_base_delay,
+    )
 
     daily_raw = data.get("daily", {})
     times = daily_raw.get("time", [])
@@ -148,58 +140,24 @@ async def get_climate_data(
 
     daily_points: List[ClimateDailyPoint] = []
     for i, date_str in enumerate(times):
-        daily_points.append(
-            ClimateDailyPoint(
-                date=date_str,
-                temperature_mean=(
-                    round(temp_means[i], 1)
-                    if i < len(temp_means) and temp_means[i] is not None
-                    else None
-                ),
-                temperature_max=(
-                    round(temp_maxs[i], 1)
-                    if i < len(temp_maxs) and temp_maxs[i] is not None
-                    else None
-                ),
-                temperature_min=(
-                    round(temp_mins[i], 1)
-                    if i < len(temp_mins) and temp_mins[i] is not None
-                    else None
-                ),
-                precipitation=(
-                    round(precips[i], 2)
-                    if i < len(precips) and precips[i] is not None
-                    else None
-                ),
-                humidity=(
-                    round(humidities[i], 1)
-                    if i < len(humidities) and humidities[i] is not None
-                    else None
-                ),
-                wind_speed=(
-                    round(winds[i], 1)
-                    if i < len(winds) and winds[i] is not None
-                    else None
-                ),
-            )
-        )
+        daily_points.append(ClimateDailyPoint(
+            date=date_str,
+            temperature_mean=(round(temp_means[i], 1) if i < len(temp_means) and temp_means[i] is not None else None),
+            temperature_max=(round(temp_maxs[i], 1) if i < len(temp_maxs) and temp_maxs[i] is not None else None),
+            temperature_min=(round(temp_mins[i], 1) if i < len(temp_mins) and temp_mins[i] is not None else None),
+            precipitation=(round(precips[i], 2) if i < len(precips) and precips[i] is not None else None),
+            humidity=(round(humidities[i], 1) if i < len(humidities) and humidities[i] is not None else None),
+            wind_speed=(round(winds[i], 1) if i < len(winds) and winds[i] is not None else None),
+        ))
 
-    summary = _calculate_summary(daily_points)
-    trend = _calculate_trend(daily_points)
-
-    return ClimateResponse(
-        location=ClimateLocation(
-            latitude=latitude,
-            longitude=longitude,
-            name=location_name,
-        ),
-        period=ClimatePeriod(
-            start=selected_start,
-            end=selected_end,
-        ),
+    result = ClimateResponse(
+        location=ClimateLocation(latitude=latitude, longitude=longitude, name=location_name),
+        period=ClimatePeriod(start=selected_start, end=selected_end),
         model=selected_model,
         daily=daily_points,
-        summary=summary,
-        trend=trend,
+        summary=_calculate_summary(daily_points),
+        trend=_calculate_trend(daily_points),
         data_source=ClimateDataSource(),
     )
+    climate_cache.set(cache_key, result, settings.climate_cache_ttl)
+    return result

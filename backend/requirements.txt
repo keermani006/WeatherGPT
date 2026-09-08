@@ -7,6 +7,12 @@ groq>=1.7.0
 python-dotenv>=1.0.0
 supabase>=2.7.0
 
+# Authentication
+PyJWT>=2.9.0
+
+# Rate limiting (in-memory, no Redis required)
+slowapi>=0.1.9
+
 # Testing
 pytest>=8.2.0
 pytest-asyncio>=0.23.0

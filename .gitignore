@@ -1,5 +1,6 @@
 # Root-level ignores
-weathergpt/          # raw working copy — backend/ is the canonical source
+# raw working copy — backend/ is the canonical source
+weathergpt/
 
 # Python
 __pycache__/

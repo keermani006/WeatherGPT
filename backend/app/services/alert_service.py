@@ -2,12 +2,20 @@
 app/services/alert_service.py
 
 CRUD and evaluation operations for meteorological alerts.
-Backed by Supabase (Postgres) with graceful in-memory fallback if Supabase
-is not configured or unavailable during local development / testing.
+
+Key improvements in Phase 2:
+  - user_id is mandatory for all CRUD operations (enforced at service layer).
+  - evaluate_all_alerts groups alerts by coordinate bucket to minimise
+    Open-Meteo API calls (N unique locations → N requests instead of N alerts).
+  - _evaluation_lock prevents overlapping scheduler cycles.
+  - Backed by Supabase (service-role key bypasses RLS); falls back to
+    in-memory store for offline dev / testing.
 """
 
+import asyncio
 import logging
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -26,22 +34,54 @@ logger = logging.getLogger(__name__)
 # In-memory fallback store for offline dev or test runs without Supabase
 _IN_MEMORY_ALERTS: Dict[str, AlertResponse] = {}
 
+# Prevent overlapping evaluation cycles from the background scheduler
+_evaluation_lock = asyncio.Lock()
+
 
 def _generate_alert_id() -> str:
-    """Generate a clean identifier for an alert (e.g. alert_a1b2c3d4)."""
     return f"alert_{uuid.uuid4().hex[:8]}"
 
 
-async def create_alert(alert_in: AlertRequest) -> AlertResponse:
+def _coord_bucket(lat: float, lon: float) -> tuple:
+    """Round to 2 decimal places to group nearby alerts into one weather call."""
+    return (round(lat, 2), round(lon, 2))
+
+
+def _row_to_alert(row: dict) -> AlertResponse:
+    return AlertResponse(
+        id=row["id"],
+        user_id=row.get("user_id"),
+        latitude=float(row["latitude"]),
+        longitude=float(row["longitude"]),
+        condition=row["condition"],
+        threshold=float(row["threshold"]),
+        active=bool(row.get("active", True)),
+        location_name=row.get("location_name"),
+        triggered=bool(row.get("triggered", False)),
+        current_value=(
+            float(row["current_value"])
+            if row.get("current_value") is not None
+            else None
+        ),
+        evaluated_at=row.get("evaluated_at"),
+        last_triggered_at=row.get("last_triggered_at"),
+        created_at=row.get("created_at"),
+    )
+
+
+# ── CRUD ──────────────────────────────────────────────────────────────────────
+
+async def create_alert(alert_in: AlertRequest, user_id: str) -> AlertResponse:
     """
-    Create and persist a new alert.
-    Writes to Supabase table 'alerts' if available, otherwise in-memory.
+    Create and persist a new alert owned by user_id.
+    Writes to Supabase if available, otherwise in-memory.
     """
     alert_id = _generate_alert_id()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     alert_obj = AlertResponse(
         id=alert_id,
+        user_id=user_id,
         latitude=alert_in.latitude,
         longitude=alert_in.longitude,
         condition=alert_in.condition.value,
@@ -60,6 +100,7 @@ async def create_alert(alert_in: AlertRequest) -> AlertResponse:
         try:
             row = {
                 "id": alert_obj.id,
+                "user_id": user_id,
                 "latitude": alert_obj.latitude,
                 "longitude": alert_obj.longitude,
                 "condition": alert_obj.condition,
@@ -74,231 +115,265 @@ async def create_alert(alert_in: AlertRequest) -> AlertResponse:
             }
             res = sb.table("alerts").insert(row).execute()
             if res.data:
-                logger.info("Alert %s saved to Supabase", alert_id)
+                logger.info("Alert %s saved to Supabase (user=%s)", alert_id, user_id)
                 _IN_MEMORY_ALERTS[alert_id] = alert_obj
                 return alert_obj
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Supabase insert failed (%s) — saving to in-memory fallback store",
-                exc,
+                "Supabase insert failed (%s) — saving to in-memory fallback store", exc
             )
 
-    # In-memory fallback
     _IN_MEMORY_ALERTS[alert_id] = alert_obj
-    logger.info("Alert %s saved to in-memory store", alert_id)
+    logger.info("Alert %s saved to in-memory store (user=%s)", alert_id, user_id)
     return alert_obj
 
 
-async def list_alerts() -> List[AlertResponse]:
-    """Retrieve all configured alerts."""
+async def list_alerts(user_id: str) -> List[AlertResponse]:
+    """Retrieve alerts belonging to user_id."""
     sb = get_supabase()
     if sb is not None:
         try:
-            res = sb.table("alerts").select("*").order("created_at", desc=True).execute()
+            res = (
+                sb.table("alerts")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
             if res.data is not None:
-                supabase_alerts = [
-                    AlertResponse(
-                        id=row["id"],
-                        latitude=float(row["latitude"]),
-                        longitude=float(row["longitude"]),
-                        condition=row["condition"],
-                        threshold=float(row["threshold"]),
-                        active=bool(row.get("active", True)),
-                        location_name=row.get("location_name"),
-                        triggered=bool(row.get("triggered", False)),
-                        current_value=(
-                            float(row["current_value"])
-                            if row.get("current_value") is not None
-                            else None
-                        ),
-                        evaluated_at=row.get("evaluated_at"),
-                        last_triggered_at=row.get("last_triggered_at"),
-                        created_at=row.get("created_at"),
-                    )
-                    for row in res.data
-                ]
-                # Merge with any fallback alerts that couldn't be inserted into Supabase
-                merged = {a.id: a for a in _IN_MEMORY_ALERTS.values()}
+                supabase_alerts = [_row_to_alert(row) for row in res.data]
+                # Merge with in-memory fallback alerts owned by this user
+                merged = {
+                    a.id: a
+                    for a in _IN_MEMORY_ALERTS.values()
+                    if a.user_id == user_id
+                }
                 for a in supabase_alerts:
                     merged[a.id] = a
                 return list(merged.values())
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Supabase list failed (%s) — returning in-memory fallback alerts",
-                exc,
+                "Supabase list failed (%s) — returning in-memory fallback", exc
             )
 
-    return list(_IN_MEMORY_ALERTS.values())
+    return [a for a in _IN_MEMORY_ALERTS.values() if a.user_id == user_id]
 
 
 async def get_alert(alert_id: str) -> Optional[AlertResponse]:
-    """Retrieve a single alert by ID."""
+    """Retrieve a single alert by ID (any user — used by scheduler)."""
     sb = get_supabase()
     if sb is not None:
         try:
             res = sb.table("alerts").select("*").eq("id", alert_id).execute()
             if res.data and len(res.data) > 0:
-                row = res.data[0]
-                return AlertResponse(
-                    id=row["id"],
-                    latitude=float(row["latitude"]),
-                    longitude=float(row["longitude"]),
-                    condition=row["condition"],
-                    threshold=float(row["threshold"]),
-                    active=bool(row.get("active", True)),
-                    location_name=row.get("location_name"),
-                    triggered=bool(row.get("triggered", False)),
-                    current_value=(
-                        float(row["current_value"])
-                        if row.get("current_value") is not None
-                        else None
-                    ),
-                    evaluated_at=row.get("evaluated_at"),
-                    last_triggered_at=row.get("last_triggered_at"),
-                    created_at=row.get("created_at"),
-                )
+                return _row_to_alert(res.data[0])
         except Exception as exc:  # noqa: BLE001
             logger.warning("Supabase get failed (%s) — querying in-memory store", exc)
 
     return _IN_MEMORY_ALERTS.get(alert_id)
 
 
-async def delete_alert(alert_id: str) -> bool:
+async def delete_alert(alert_id: str, user_id: str) -> bool:
     """
-    Delete an alert by ID.
-    Returns True if found and deleted, False otherwise.
+    Delete an alert by ID, enforcing ownership at the service layer.
+    Returns True if found and deleted, False if not found, raises PermissionError if not owned.
     """
-    found = False
-
     existing = await get_alert(alert_id)
     if existing is None and alert_id not in _IN_MEMORY_ALERTS:
         return False
 
+    # Backend ownership check (independent of RLS)
+    if existing and existing.user_id and existing.user_id != user_id:
+        logger.warning(
+            "Ownership violation: user %s attempted to delete alert %s owned by %s",
+            user_id, alert_id, existing.user_id,
+        )
+        raise PermissionError(f"Alert '{alert_id}' does not belong to the authenticated user.")
+
+    found = False
     sb = get_supabase()
     if sb is not None:
         try:
-            res = sb.table("alerts").delete().eq("id", alert_id).execute()
+            res = (
+                sb.table("alerts")
+                .delete()
+                .eq("id", alert_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
             if res.data and len(res.data) > 0:
                 found = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Supabase delete failed (%s) — falling back to in-memory", exc)
 
     if alert_id in _IN_MEMORY_ALERTS:
-        del _IN_MEMORY_ALERTS[alert_id]
-        found = True
+        mem_alert = _IN_MEMORY_ALERTS[alert_id]
+        if mem_alert.user_id is None or mem_alert.user_id == user_id:
+            del _IN_MEMORY_ALERTS[alert_id]
+            found = True
 
     return found
 
 
-async def evaluate_alert(alert: AlertResponse) -> AlertEvaluationItem:
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+async def evaluate_alert_with_weather(
+    alert: AlertResponse, weather_value: float
+) -> AlertEvaluationItem:
     """
-    Evaluate an individual alert against real-time Open-Meteo weather data.
-    Updates alert's triggered status, current_value, evaluated_at, and last_triggered_at.
-    Prevents repeated triggering events if condition remains above threshold.
-    Re-triggers when condition drops below threshold and later crosses again.
+    Evaluate a single alert against an already-fetched weather value.
+    Updates persistence (Supabase or in-memory).
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    is_above = weather_value >= alert.threshold
+    was_triggered = alert.triggered
 
-    try:
-        current_data = await get_current_weather(
-            alert.latitude, alert.longitude, location_name=alert.location_name or "Alert Location"
-        )
-        cw = current_data.current
+    if is_above:
+        alert.triggered = True
+        if not was_triggered or alert.last_triggered_at is None:
+            alert.last_triggered_at = now_iso  # New trigger event
+    else:
+        alert.triggered = False  # Reset when condition clears
 
-        # Extract metric value based on alert condition
-        if alert.condition == AlertCondition.RAIN_PROBABILITY.value:
-            observed_val = float(cw.rain_probability if cw.rain_probability is not None else 0.0)
-        elif alert.condition == AlertCondition.TEMPERATURE.value:
-            observed_val = float(cw.temperature)
-        elif alert.condition == AlertCondition.WIND_SPEED.value:
-            observed_val = float(cw.wind_speed)
-        elif alert.condition == AlertCondition.PRECIPITATION.value:
-            observed_val = float(cw.precipitation)
-        else:
-            observed_val = 0.0
+    alert.current_value = round(weather_value, 2)
+    alert.evaluated_at = now_iso
 
-        # Check threshold condition: trigger when observed_val >= threshold
-        is_above_threshold = observed_val >= alert.threshold
+    sb = get_supabase()
+    if sb is not None:
+        try:
+            sb.table("alerts").update(
+                {
+                    "triggered": alert.triggered,
+                    "current_value": alert.current_value,
+                    "evaluated_at": alert.evaluated_at,
+                    "last_triggered_at": alert.last_triggered_at,
+                }
+            ).eq("id", alert.id).execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Supabase update for alert %s failed: %s", alert.id, exc)
 
-        was_triggered = alert.triggered
-        if is_above_threshold:
-            alert.triggered = True
-            # Transition from not-triggered -> triggered: record last_triggered_at
-            if not was_triggered or alert.last_triggered_at is None:
-                alert.last_triggered_at = now_iso
-            # If already triggered, maintain existing last_triggered_at (no repeated trigger event)
-        else:
-            # Condition fell below threshold: reset triggered state
-            alert.triggered = False
+    _IN_MEMORY_ALERTS[alert.id] = alert
 
-        alert.current_value = round(observed_val, 2)
-        alert.evaluated_at = now_iso
+    return AlertEvaluationItem(
+        alert_id=alert.id,
+        triggered=alert.triggered,
+        current_value=alert.current_value,
+        condition=alert.condition,
+        threshold=alert.threshold,
+        evaluated_at=now_iso,
+    )
 
-        # Persist updated state to Supabase or in-memory
-        sb = get_supabase()
-        if sb is not None:
-            try:
-                sb.table("alerts").update(
-                    {
-                        "triggered": alert.triggered,
-                        "current_value": alert.current_value,
-                        "evaluated_at": alert.evaluated_at,
-                        "last_triggered_at": alert.last_triggered_at,
-                    }
-                ).eq("id", alert.id).execute()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Supabase update for alert %s failed: %s", alert.id, exc)
 
-        _IN_MEMORY_ALERTS[alert.id] = alert
+def _extract_condition_value(alert: AlertResponse, weather) -> float:
+    """Extract the relevant metric from current weather conditions."""
+    cw = weather.current
+    if alert.condition == AlertCondition.RAIN_PROBABILITY.value:
+        return float(cw.rain_probability if cw.rain_probability is not None else 0.0)
+    if alert.condition == AlertCondition.TEMPERATURE.value:
+        return float(cw.temperature)
+    if alert.condition == AlertCondition.WIND_SPEED.value:
+        return float(cw.wind_speed)
+    if alert.condition == AlertCondition.PRECIPITATION.value:
+        return float(cw.precipitation)
+    return 0.0
 
-        return AlertEvaluationItem(
-            alert_id=alert.id,
-            triggered=alert.triggered,
-            current_value=alert.current_value,
-            condition=alert.condition,
-            threshold=alert.threshold,
-            evaluated_at=now_iso,
-        )
 
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Error evaluating alert %s: %s", alert.id, exc)
-        return AlertEvaluationItem(
-            alert_id=alert.id,
-            triggered=alert.triggered,
-            current_value=alert.current_value,
-            condition=alert.condition,
-            threshold=alert.threshold,
-            evaluated_at=now_iso,
-            error=f"Weather check failed: {exc}",
-        )
+async def _list_all_alerts_for_scheduler() -> List[AlertResponse]:
+    """Retrieve all alerts (any user) for the background scheduler."""
+    sb = get_supabase()
+    if sb is not None:
+        try:
+            res = sb.table("alerts").select("*").order("created_at", desc=True).execute()
+            if res.data is not None:
+                supabase_alerts = [_row_to_alert(row) for row in res.data]
+                merged = {a.id: a for a in _IN_MEMORY_ALERTS.values()}
+                for a in supabase_alerts:
+                    merged[a.id] = a
+                return list(merged.values())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Supabase list-all failed (%s) — using in-memory", exc)
+    return list(_IN_MEMORY_ALERTS.values())
 
 
 async def evaluate_all_alerts() -> AlertBatchEvaluationResponse:
     """
-    Evaluate all active alerts immediately.
-    Used by POST /api/v1/alerts/evaluate and by the background scheduler.
+    Evaluate all active alerts.
+
+    Optimisation: alerts are grouped by coordinate bucket so that N alerts
+    at the same location generate only 1 Open-Meteo request.
+
+    Overlap protection: skips evaluation if a previous cycle is still running
+    (prevents pile-up under slow Open-Meteo responses).
     """
-    alerts = await list_alerts()
-    active_alerts = [a for a in alerts if a.active]
+    if _evaluation_lock.locked():
+        logger.warning("Alert evaluation skipped — previous cycle still running")
+        return AlertBatchEvaluationResponse(evaluated=0, triggered=0, results=[])
 
-    results: List[AlertEvaluationItem] = []
-    for a in active_alerts:
-        res = await evaluate_alert(a)
-        results.append(res)
+    async with _evaluation_lock:
+        alerts = await _list_all_alerts_for_scheduler()
+        active_alerts = [a for a in alerts if a.active]
 
-    triggered_count = sum(1 for r in results if r.triggered)
+        if not active_alerts:
+            logger.info("Alert evaluation: no active alerts to evaluate")
+            return AlertBatchEvaluationResponse(evaluated=0, triggered=0, results=[])
 
-    logger.info(
-        "Alert evaluation cycle complete: %d evaluated, %d triggered",
-        len(results),
-        triggered_count,
-    )
+        # Group alerts by coordinate bucket to minimise upstream API calls
+        buckets: dict = defaultdict(list)
+        for alert in active_alerts:
+            bucket = _coord_bucket(alert.latitude, alert.longitude)
+            buckets[bucket].append(alert)
 
-    return AlertBatchEvaluationResponse(
-        evaluated=len(results),
-        triggered=triggered_count,
-        results=results,
-    )
+        logger.info(
+            "Alert evaluation: %d alerts across %d location bucket(s)",
+            len(active_alerts), len(buckets),
+        )
+
+        results: List[AlertEvaluationItem] = []
+        for (lat, lon), bucket_alerts in buckets.items():
+            location_name = bucket_alerts[0].location_name or "Alert Location"
+            try:
+                weather = await get_current_weather(lat, lon, location_name)
+                for alert in bucket_alerts:
+                    try:
+                        value = _extract_condition_value(alert, weather)
+                        result = await evaluate_alert_with_weather(alert, value)
+                        results.append(result)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Error evaluating alert %s: %s", alert.id, exc)
+                        results.append(AlertEvaluationItem(
+                            alert_id=alert.id,
+                            triggered=alert.triggered,
+                            current_value=alert.current_value,
+                            condition=alert.condition,
+                            threshold=alert.threshold,
+                            evaluated_at=datetime.now(timezone.utc).isoformat(),
+                            error=f"Evaluation error: {exc}",
+                        ))
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Weather fetch failed for bucket (%.2f, %.2f): %s", lat, lon, exc
+                )
+                for alert in bucket_alerts:
+                    results.append(AlertEvaluationItem(
+                        alert_id=alert.id,
+                        triggered=alert.triggered,
+                        current_value=alert.current_value,
+                        condition=alert.condition,
+                        threshold=alert.threshold,
+                        evaluated_at=datetime.now(timezone.utc).isoformat(),
+                        error=f"Weather fetch failed: {exc}",
+                    ))
+
+        triggered_count = sum(1 for r in results if r.triggered)
+        logger.info(
+            "Alert evaluation complete: %d evaluated, %d triggered, %d location buckets",
+            len(results), triggered_count, len(buckets),
+        )
+        return AlertBatchEvaluationResponse(
+            evaluated=len(results),
+            triggered=triggered_count,
+            results=results,
+        )
 
 
 def clear_in_memory_alerts():
