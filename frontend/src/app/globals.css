@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* ── Color tokens ── */
+  --color-ink: #131B22;
+  --color-paper: #EEECE6;
+  --color-isobar: #1F4E66;
+  --color-ochre: #B8752E;
+  --color-teal: #2E6F63;
+  --color-hairline: #C9C4B8;
+
+  /* ── Font stacks ── */
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-ibm-plex-mono);
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+/* Tabular numbers for all monospace data readouts */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hairline rule utility — no drop shadows anywhere */
+.hairline {
+  border-color: var(--color-hairline);
+}
+
+/* ── Keyboard focus styles ── */
+/* Ensure every interactive element has a visible focus ring */
+:focus-visible {
+  outline: 2px solid var(--color-isobar);
+  outline-offset: 2px;
+}
+
+/* ── Reduced-motion support ── */
+/* The one animated entrance (hourly strip) respects prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Horizontal scroll for hourly strip on mobile ── */
+.hourly-strip {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.hourly-strip::-webkit-scrollbar {
+  display: none;
+}
