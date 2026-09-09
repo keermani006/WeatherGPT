@@ -225,52 +225,44 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not fetch destination weather: %s", exc)
 
-    # ── 8. Run LLM + alert detection concurrently ─────────────────────────────
+    # ── 8. Build alert suggestion & generate LLM response ─────────────────────
+    alert_suggestion = None
     try:
-        llm_task = asyncio.create_task(
-            generate_weather_response(
-                user_question=body.message,
-                weather_data=weather_data,
-                history=body.history,
-                destination_weather=destination_weather,
+        raw_alert = await build_alert_suggestion(body.message, weather_data)
+        if raw_alert and destination_weather and destination_resolved:
+            alert_suggestion = AlertSuggestion(
+                location_name=destination_resolved.name,
+                latitude=destination_resolved.latitude,
+                longitude=destination_resolved.longitude,
+                condition=raw_alert.condition,
+                threshold=raw_alert.threshold,
+                description=raw_alert.description.replace(
+                    weather_data.location, destination_resolved.name
+                ),
             )
-        )
-        alert_task = asyncio.create_task(
-            build_alert_suggestion(body.message, weather_data)
-        )
+        elif raw_alert:
+            alert_suggestion = AlertSuggestion(
+                location_name=resolved.name,
+                latitude=resolved.latitude,
+                longitude=resolved.longitude,
+                condition=raw_alert.condition,
+                threshold=raw_alert.threshold,
+                description=raw_alert.description,
+            )
 
-        answer, alert_suggestion = await asyncio.gather(llm_task, alert_task)
-
+        answer = await generate_weather_response(
+            user_question=body.message,
+            weather_data=weather_data,
+            history=body.history,
+            destination_weather=destination_weather,
+            alert_suggestion=alert_suggestion,
+        )
     except httpx.TimeoutException:
         logger.warning("LLM timed out; returning structured fallback for '%s'", resolved.name)
         answer = _build_fallback_answer(weather_data, destination_weather)
-        alert_suggestion = None
     except Exception as exc:  # noqa: BLE001
         logger.error("LLM/alert error: %s", exc)
         answer = _build_fallback_answer(weather_data, destination_weather)
-        alert_suggestion = None
-
-    # Fix alert_suggestion coordinates (llm_service doesn't have them directly)
-    if alert_suggestion and destination_weather and destination_resolved:
-        alert_suggestion = AlertSuggestion(
-            location_name=destination_resolved.name,
-            latitude=destination_resolved.latitude,
-            longitude=destination_resolved.longitude,
-            condition=alert_suggestion.condition,
-            threshold=alert_suggestion.threshold,
-            description=alert_suggestion.description.replace(
-                weather_data.location, destination_resolved.name
-            ),
-        )
-    elif alert_suggestion:
-        alert_suggestion = AlertSuggestion(
-            location_name=resolved.name,
-            latitude=resolved.latitude,
-            longitude=resolved.longitude,
-            condition=alert_suggestion.condition,
-            threshold=alert_suggestion.threshold,
-            description=alert_suggestion.description,
-        )
 
     elapsed = (time.perf_counter() - start) * 1000
     logger.info(
