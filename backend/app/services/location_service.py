@@ -80,6 +80,42 @@ def extract_location_from_message(message: str | None) -> Optional[str]:
     return None
 
 
+# Travel patterns — "travel to X", "go to X", "from X to Y", "trip to X"
+_TRAVEL_TO_PATTERNS = [
+    re.compile(r"\btravel(?:ling|ing)?\s+(?:from\s+\S+\s+)?to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\bgo(?:ing)?\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\btrip\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\bvisit(?:ing)?\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\bflight\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\bhead(?:ing)?\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
+    re.compile(r"\bfrom\s+(?:here|current\s+location|my\s+location)\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok)|\?|$)", re.IGNORECASE),
+]
+
+_TRAVEL_STOP = {"now", "today", "safe", "okay", "ok", "good", "bad", "from", "here", "my"}
+
+
+def extract_travel_destination(message: str | None) -> Optional[str]:
+    """
+    Extract travel destination from messages like:
+      - "Is it okay to travel to Delhi now?"
+      - "Should I go to Mumbai today?"
+      - "Is it safe to travel from current location to Bangalore?"
+    Returns the destination city name, or None if no travel intent found.
+    """
+    if not message:
+        return None
+    for pattern in _TRAVEL_TO_PATTERNS:
+        match = pattern.search(message)
+        if match:
+            dest = match.group(1).strip().rstrip("?.!,").strip()
+            # Filter out stop words / garbage
+            if dest and dest.lower() not in _TRAVEL_STOP and len(dest) > 1:
+                return dest
+    return None
+
+
+
+
 
 
 async def geocode_location(place_name: str) -> tuple[float, float, str]:

@@ -203,9 +203,10 @@ export function sendChatMessage(params: {
 }) {
   const isPlaceholder =
     !params.location_name ||
-    ["current location", "current", "my location", "here", "device location", "gps", "unknown"].includes(
-      params.location_name.toLowerCase().trim()
-    );
+    [
+      "current location", "current", "my location", "here",
+      "device location", "gps", "unknown",
+    ].includes(params.location_name.toLowerCase().trim());
 
   return request<{
     answer: string;
@@ -217,9 +218,28 @@ export function sendChatMessage(params: {
       condition: string;
       humidity: number;
       wind_speed: number;
-      rain_probability: number;
+      rain_probability?: number;
       rainfall?: number;
       forecast_date?: string;
+    };
+    destination_weather?: {
+      location: string;
+      temperature: number;
+      feels_like: number;
+      condition: string;
+      humidity: number;
+      wind_speed: number;
+      rain_probability?: number;
+      rainfall?: number;
+      forecast_date?: string;
+    };
+    alert_suggestion?: {
+      location_name: string;
+      latitude: number;
+      longitude: number;
+      condition: string;
+      threshold: number;
+      description: string;
     };
   }>("/api/v1/chat", {
     method: "POST",
@@ -228,10 +248,11 @@ export function sendChatMessage(params: {
       latitude: params.lat ?? null,
       longitude: params.lng ?? null,
       location: isPlaceholder ? null : params.location_name,
+      history: params.history ?? [],
     }),
   });
-
 }
+
 
 // ── 6. Location search ───────────────────────────────────────────────────────
 // Backend param: q (not query)
@@ -431,4 +452,3 @@ export async function getDemoToken(body?: {
 export function getMe(): Promise<AuthUser> {
   return request<AuthUser>("/api/v1/auth/me");
 }
-

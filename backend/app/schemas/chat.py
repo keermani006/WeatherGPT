@@ -5,11 +5,17 @@ Pydantic models for request / response validation.
 These are the shapes the client interacts with.
 """
 
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
 # ── Request ──────────────────────────────────────────────────────────────────
+
+class HistoryMessage(BaseModel):
+    """A single turn in conversation history."""
+    role: str = Field(description="'user' or 'assistant'")
+    content: str = Field(max_length=2000)
+
 
 class ChatRequest(BaseModel):
     """Incoming chat message from the user."""
@@ -41,6 +47,11 @@ class ChatRequest(BaseModel):
         description="User GPS longitude provided by browser Geolocation API.",
         examples=[80.2707],
     )
+    history: Optional[List[HistoryMessage]] = Field(
+        default=None,
+        max_length=20,
+        description="Previous conversation turns (most recent last, up to 20 turns).",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -48,6 +59,8 @@ class ChatRequest(BaseModel):
                 {"message": "Will it rain here today?", "latitude": 13.0827, "longitude": 80.2707},
                 {"message": "What's the weather in Mumbai?"},
                 {"message": "Is it cold today?", "location": "Manali"},
+                {"message": "Is it safe to travel from Chennai to Delhi now?",
+                 "latitude": 13.0827, "longitude": 80.2707},
             ]
         }
     }
@@ -75,6 +88,18 @@ class WeatherData(BaseModel):
     )
 
 
+# ── Alert suggestion (returned when LLM detects alert intent) ─────────────────
+
+class AlertSuggestion(BaseModel):
+    """A suggested alert the user can create with one click."""
+    location_name: str = Field(description="Human-readable location for the alert")
+    latitude: float
+    longitude: float
+    condition: str = Field(description="Alert condition: rain_probability | temperature | wind_speed | precipitation")
+    threshold: float = Field(description="Threshold value")
+    description: str = Field(description="Short human explanation, e.g. 'Alert when rain > 70% in Delhi'")
+
+
 # ── Response ─────────────────────────────────────────────────────────────────
 
 class ChatResponse(BaseModel):
@@ -86,12 +111,20 @@ class ChatResponse(BaseModel):
         default=None,
         description="Structured weather data backing the answer (null if location unknown).",
     )
+    destination_weather: Optional[WeatherData] = Field(
+        default=None,
+        description="Weather at the destination for travel queries.",
+    )
+    alert_suggestion: Optional[AlertSuggestion] = Field(
+        default=None,
+        description="Pre-filled alert params when user expresses alert intent.",
+    )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "answer": "There is a 70% chance of rain tomorrow in Chennai — an umbrella is recommended.",
+                    "answer": "There is a 70% chance of rain tomorrow in Chennai.",
                     "location": "Chennai",
                     "weather_data": {
                         "location": "Chennai",
@@ -104,6 +137,7 @@ class ChatResponse(BaseModel):
                         "rainfall": None,
                         "forecast_date": "2026-09-09",
                     },
+                    "alert_suggestion": None,
                 }
             ]
         }
