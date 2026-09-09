@@ -6,8 +6,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocationStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth-context";
 import {
   getAlerts,
   createAlert,
@@ -28,21 +30,25 @@ const CONDITIONS: { value: string; label: string; unit: string }[] = [
 export default function AlertsPage() {
   const queryClient = useQueryClient();
   const { lat, lng, name: locationName } = useLocationStore();
+  const { user, isAuthenticated, loginDemo, isLoading: authLoading } = useAuth();
 
   // Form state
   const [condition, setCondition] = useState("temperature");
   const [threshold, setThreshold] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [demoStarting, setDemoStarting] = useState(false);
 
-  // Fetch alerts list
+  // Fetch alerts list (enabled only when authenticated)
   const {
     data: alertsData,
     error: listError,
     isLoading,
   } = useQuery({
-    queryKey: ["alerts"],
+    queryKey: ["alerts", user?.id],
     queryFn: getAlerts,
+    enabled: isAuthenticated,
   });
+
 
   // Create mutation
   const createMutation = useMutation({
@@ -81,8 +87,25 @@ export default function AlertsPage() {
     },
   });
 
+  async function handleDemoSession() {
+    setDemoStarting(true);
+    try {
+      await loginDemo();
+    } catch {
+      setFormError("Failed to initiate demo session.");
+    } finally {
+      setDemoStarting(false);
+    }
+  }
+
   function handleCreate() {
     setFormError(null);
+
+    if (!isAuthenticated) {
+      setFormError("Please sign in or start a demo session to create alerts.");
+      return;
+    }
+
     const value = parseFloat(threshold);
     if (isNaN(value)) {
       setFormError("Please enter a valid number");
@@ -108,16 +131,64 @@ export default function AlertsPage() {
 
   return (
     <main className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto px-6 py-8">
-      <h1 className="font-sans text-2xl font-semibold text-ink">Alerts</h1>
-      <p className="font-sans text-sm text-ink/50 mt-1">
-        Get notified when weather conditions cross your thresholds
-      </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="font-sans text-2xl font-semibold text-ink">Alerts</h1>
+          <p className="font-sans text-sm text-ink/50 mt-1">
+            Get notified when weather conditions cross your thresholds
+          </p>
+        </div>
+        {isAuthenticated && user && (
+          <span className="font-mono text-xs text-teal border border-teal/30 bg-teal/5 px-2.5 py-1">
+            ✓ Synced ({user.email.split("@")[0]})
+          </span>
+        )}
+      </div>
 
       <hr className="border-t border-hairline mt-4 mb-6" />
+
+      {/* ── Unauthenticated Notice ── */}
+      {!authLoading && !isAuthenticated && (
+        <div className="mb-6 p-4 border border-isobar/30 bg-isobar/5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h3 className="font-sans text-sm font-semibold text-isobar">
+                Sign in to manage alerts
+              </h3>
+              <p className="font-sans text-xs text-ink/70 mt-0.5">
+                Alerts require an authenticated user. Sign in, create an account, or start a 1-click guest session.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Link
+                href="/login"
+                className="px-3 py-1.5 text-xs font-sans font-medium text-isobar border border-isobar/40 hover:bg-isobar/10 transition-colors"
+              >
+                Sign In
+              </Link>
+              <Link
+                href="/register"
+                className="px-3 py-1.5 text-xs font-sans font-medium text-paper bg-isobar hover:bg-isobar/90 transition-colors"
+              >
+                Register
+              </Link>
+              <button
+                type="button"
+                onClick={handleDemoSession}
+                disabled={demoStarting}
+                className="px-3 py-1.5 text-xs font-sans font-medium text-ink/80 border border-hairline hover:border-isobar transition-colors"
+              >
+                {demoStarting ? "Connecting…" : "⚡ Demo"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Create alert form ── */}
       <section>
         <h2 className="font-sans text-sm text-ink/50 mb-3">New alert</h2>
+
 
         <div className="flex flex-wrap items-end gap-3">
           {/* Condition dropdown */}

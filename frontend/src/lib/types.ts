@@ -221,3 +221,25 @@ export interface LocationResult {
 export interface LocationSearchResponse {
   results: LocationResult[];
 }
+
+// ── 12. Authentication ────────────────────────
+export interface AuthUser {
+  id: string;
+  email: string;
+  name?: string | null;
+  role?: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: AuthUser;
+}
+
+export interface DemoTokenResponse {
+  access_token: string;
+  token_type: string;
+  user_id: string;
+  email: string;
+}
+

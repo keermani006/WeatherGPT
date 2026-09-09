@@ -5,6 +5,7 @@
  * ────────────────────────────────────────────── */
 
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 export interface LocationState {
   lat: number | null;
@@ -14,10 +15,18 @@ export interface LocationState {
   clearLocation: () => void;
 }
 
-export const useLocationStore = create<LocationState>((set) => ({
-  lat: null,
-  lng: null,
-  name: null,
-  setLocation: (lat, lng, name) => set({ lat, lng, name }),
-  clearLocation: () => set({ lat: null, lng: null, name: null }),
-}));
+export const useLocationStore = create<LocationState>()(
+  persist(
+    (set) => ({
+      lat: null,
+      lng: null,
+      name: null,
+      setLocation: (lat, lng, name) => set({ lat, lng, name }),
+      clearLocation: () => set({ lat: null, lng: null, name: null }),
+    }),
+    {
+      name: "weathergpt_location",
+    }
+  )
+);
+

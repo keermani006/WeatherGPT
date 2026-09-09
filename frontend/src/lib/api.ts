@@ -19,30 +19,81 @@ export class ApiError extends Error {
   }
 }
 
+// ── Auth Token Management ───────────────────────────────────────────────────
+let memoryToken: string | null = null;
+
+export function getAuthToken(): string | null {
+  if (typeof window !== "undefined") {
+    try {
+      return localStorage.getItem("weathergpt_token") || memoryToken;
+    } catch {
+      return memoryToken;
+    }
+  }
+  return memoryToken;
+}
+
+export function setAuthToken(token: string | null) {
+  memoryToken = token;
+  if (typeof window !== "undefined") {
+    try {
+      if (token) {
+        localStorage.setItem("weathergpt_token", token);
+      } else {
+        localStorage.removeItem("weathergpt_token");
+      }
+    } catch {
+      // ignore storage quota / sandbox errors
+    }
+  }
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit
 ): Promise<T> {
+  const token = getAuthToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+
+  if (token && !headers["Authorization"]) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers,
   });
 
   if (res.status === 204) return undefined as T;
 
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    const err = json?.detail?.error;
-    throw new ApiError(
-      err?.code ?? "UNKNOWN_ERROR",
-      err?.message ?? "An unexpected error occurred.",
-      res.status
-    );
+    const err = json?.detail?.error || (typeof json?.detail === "object" && json?.detail?.code ? json.detail : null);
+    const code =
+      err?.code ??
+      (res.status === 403
+        ? "WEATHER_GUARDRAIL_TRIGGERED"
+        : res.status === 404
+        ? "LOCATION_NOT_FOUND"
+        : res.status === 401
+        ? "UNAUTHORIZED"
+        : "UNKNOWN_ERROR");
+    const message =
+      err?.message ??
+      (typeof json?.detail === "string"
+        ? json.detail
+        : "An unexpected error occurred.");
+    throw new ApiError(code, message, res.status);
   }
+
 
   return json as T;
 }
+
 
 // ── Helper: build query string ───────────────────────────────────────────────
 function qs(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -150,6 +201,12 @@ export function sendChatMessage(params: {
   location_name?: string;
   history?: { role: string; content: string }[];
 }) {
+  const isPlaceholder =
+    !params.location_name ||
+    ["current location", "current", "my location", "here", "device location", "gps", "unknown"].includes(
+      params.location_name.toLowerCase().trim()
+    );
+
   return request<{
     answer: string;
     location: string;
@@ -170,9 +227,10 @@ export function sendChatMessage(params: {
       message: params.message,
       latitude: params.lat ?? null,
       longitude: params.lng ?? null,
-      location: params.location_name ?? null,
+      location: isPlaceholder ? null : params.location_name,
     }),
   });
+
 }
 
 // ── 6. Location search ───────────────────────────────────────────────────────
@@ -313,3 +371,64 @@ export function getClimate(params: {
     })}`
   );
 }
+
+// ── 12. Authentication ────────────────────────────────────────────────────────
+import type { AuthResponse, AuthUser, DemoTokenResponse } from "@/lib/types";
+
+export async function loginUser(body: { email: string; password: string }): Promise<AuthResponse> {
+  const res = await request<AuthResponse>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (res?.access_token) {
+    setAuthToken(res.access_token);
+  }
+  return res;
+}
+
+export async function registerUser(body: {
+  email: string;
+  password: string;
+  name?: string;
+}): Promise<AuthResponse> {
+  const res = await request<AuthResponse>("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (res?.access_token) {
+    setAuthToken(res.access_token);
+  }
+  return res;
+}
+
+export async function logoutUser(): Promise<{ message: string }> {
+  try {
+    const res = await request<{ message: string }>("/api/v1/auth/logout", {
+      method: "POST",
+    });
+    setAuthToken(null);
+    return res;
+  } catch {
+    setAuthToken(null);
+    return { message: "Logged out" };
+  }
+}
+
+export async function getDemoToken(body?: {
+  user_id?: string;
+  email?: string;
+}): Promise<DemoTokenResponse> {
+  const res = await request<DemoTokenResponse>("/api/v1/auth/demo-token", {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  if (res?.access_token) {
+    setAuthToken(res.access_token);
+  }
+  return res;
+}
+
+export function getMe(): Promise<AuthUser> {
+  return request<AuthUser>("/api/v1/auth/me");
+}
+

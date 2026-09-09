@@ -9,8 +9,9 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useLocationStore } from "@/lib/store";
-import { sendChatMessage, ApiError } from "@/lib/api";
+import { sendChatMessage, getCurrentWeather, ApiError } from "@/lib/api";
 import { WeatherWidget } from "@/components/weather-widget";
+
 import { PinIcon } from "@/components/icons";
 import type { ChatMessage, WeatherData } from "@/lib/types";
 
@@ -30,10 +31,11 @@ const SUGGESTIONS = [
 ];
 
 export default function ChatPage() {
-  const { lat, lng, name: locationName } = useLocationStore();
+  const { lat, lng, name: locationName, setLocation } = useLocationStore();
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [detectingLoc, setDetectingLoc] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,10 +44,38 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Focus input on mount
+  // Focus input on mount & auto-detect location if not set
   useEffect(() => {
     inputRef.current?.focus();
+    if (lat === null || lng === null) {
+      detectLocation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function detectLocation() {
+    if (typeof window === "undefined" || !navigator.geolocation) return;
+    setDetectingLoc(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const latitude = pos.coords.latitude;
+        const longitude = pos.coords.longitude;
+        try {
+          const res = await getCurrentWeather({ lat: latitude, lng: longitude });
+          setLocation(latitude, longitude, res.location.name);
+        } catch {
+          setLocation(latitude, longitude, "Current Location");
+        } finally {
+          setDetectingLoc(false);
+        }
+      },
+      () => {
+        setDetectingLoc(false);
+      },
+      { timeout: 8000 }
+    );
+  }
+
 
   async function doSend(text: string) {
     const trimmed = text.trim();
@@ -69,6 +99,11 @@ export default function ChatPage() {
         history,
       });
 
+      // If backend resolved a specific location and user didn't have one, sync it
+      if (response.location && response.location !== "Unknown" && response.location !== "Global" && !locationName) {
+        setLocation(lat ?? 0, lng ?? 0, response.location);
+      }
+
       setMessages((prev) => [
         ...prev,
         {
@@ -79,40 +114,34 @@ export default function ChatPage() {
       ]);
     } catch (err) {
       if (err instanceof ApiError) {
-        switch (err.code) {
-          case "LOCATION_REQUIRED":
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content:
-                  "I need a location to check the weather. You can mention a city in your message (e.g. \"weather in London\"), or go to the dashboard to set your location.",
-              },
-            ]);
-            break;
-          case "WEATHER_GUARDRAIL_TRIGGERED":
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content:
-                  "I can only help with weather-related questions. Try asking about the forecast, temperature, or conditions for a location.",
-              },
-            ]);
-            break;
-          case "LOCATION_NOT_FOUND":
-          case "WEATHER_API_ERROR":
-          case "WEATHER_API_TIMEOUT":
-            setMessages((prev) => [
-              ...prev,
-              { role: "system", content: err.message },
-            ]);
-            break;
-          default:
-            setMessages((prev) => [
-              ...prev,
-              { role: "system", content: err.message },
-            ]);
+        const isGuardrail =
+          err.code === "WEATHER_GUARDRAIL_TRIGGERED" ||
+          err.status === 403 ||
+          err.message.toLowerCase().includes("weather-related");
+
+        if (isGuardrail) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content:
+                "I'm WeatherGPT, focused exclusively on weather and atmospheric conditions! You can ask about current conditions, forecasts, precipitation, or temperatures for any city worldwide (e.g. 'Weather in Tokyo' or 'Will it rain today?').",
+            },
+          ]);
+        } else if (err.code === "LOCATION_REQUIRED") {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content:
+                "I need a location to check the weather. You can mention a city in your message (e.g. \"weather in London\"), or click 'Detect GPS' below.",
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { role: "system", content: err.message },
+          ]);
         }
       } else {
         setMessages((prev) => [
@@ -132,6 +161,7 @@ export default function ChatPage() {
       doSend(input);
     }
   }
+
 
   const isEmpty = messages.length === 0;
 
@@ -230,7 +260,30 @@ export default function ChatPage() {
       </div>
 
       {/* Input area — always docked at bottom */}
-      <div className="border-t border-hairline px-6 py-4 shrink-0">
+      <div className="border-t border-hairline px-6 py-3 shrink-0">
+        <div className="flex items-center justify-between text-xs font-sans text-ink/50 mb-2">
+          <div className="flex items-center gap-1.5">
+            <PinIcon className="w-3 h-3 text-isobar" />
+            {locationName ? (
+              <span>
+                Location: <strong className="text-ink font-medium">{locationName}</strong>
+              </span>
+            ) : (
+              <span>
+                Location: <span className="italic">Not set (auto-detect or mention a city)</span>
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={detectLocation}
+            disabled={detectingLoc}
+            className="text-[11px] text-isobar hover:underline flex items-center gap-1 disabled:opacity-50"
+          >
+            {detectingLoc ? "Detecting GPS…" : locationName ? "↻ Re-detect GPS" : "📍 Detect GPS"}
+          </button>
+        </div>
+
         <div className="flex items-end gap-3">
           <textarea
             ref={inputRef}
@@ -240,7 +293,7 @@ export default function ChatPage() {
             placeholder={
               locationName
                 ? `Ask about weather in ${locationName}…`
-                : "Ask about the weather…"
+                : "Ask about weather in any city (e.g. London)…"
             }
             rows={1}
             className="flex-1 resize-none bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/40 focus:border-isobar focus:outline-none transition-colors"
@@ -255,6 +308,7 @@ export default function ChatPage() {
           </button>
         </div>
       </div>
+
     </main>
   );
 }

@@ -10,8 +10,10 @@
 import { useState, useEffect, useRef } from "react";
 import { useLocationStore } from "@/lib/store";
 import { useLocationSearch } from "@/lib/hooks";
+import { getCurrentWeather } from "@/lib/api";
 import { InlineError } from "@/components/inline-error";
 import { GpsIcon } from "@/components/icons";
+
 
 export function LocationBar() {
   const { name, setLocation } = useLocationStore();
@@ -57,12 +59,21 @@ export function LocationBar() {
   }, []);
 
   function doGeolocation() {
+
     if (!navigator.geolocation) return;
     setGeoLoading(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLocation(pos.coords.latitude, pos.coords.longitude, "Current location");
-        setGeoLoading(false);
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        try {
+          const data = await getCurrentWeather({ lat, lng });
+          setLocation(lat, lng, data.location.name);
+        } catch {
+          setLocation(lat, lng, "Current Location");
+        } finally {
+          setGeoLoading(false);
+        }
       },
       () => {
         // Denied or unavailable — show prompt state, don't re-prompt
@@ -73,6 +84,7 @@ export function LocationBar() {
       { timeout: 10_000 }
     );
   }
+
 
   function selectLocation(result: { name: string; latitude: number; longitude: number }) {
     setLocation(result.latitude, result.longitude, result.name);
