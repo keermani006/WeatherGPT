@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: weathergpt-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: APP_NAME
+        value: WeatherGPT
+      - key: APP_VERSION
+        value: 2.0.0
+      - key: MAX_MESSAGE_LENGTH
+        value: "1000"
+      - key: RATE_LIMIT_CHAT
+        value: 20/minute
+      - key: RATE_LIMIT_ALERTS
+        value: 20/minute
+      - key: RATE_LIMIT_LOCATION
+        value: 30/minute
+      - key: WEATHER_CACHE_TTL
+        value: "300"
+      - key: FORECAST_CACHE_TTL
+        value: "600"
+      - key: CLIMATE_CACHE_TTL
+        value: "3600"
+      - key: LOCATION_CACHE_TTL
+        value: "3600"
+      - key: OPEN_METEO_BASE_URL
+        value: https://api.open-meteo.com/v1
+      - key: OPEN_METEO_CLIMATE_URL
+        value: https://climate-api.open-meteo.com/v1
+      - key: NOMINATIM_BASE_URL
+        value: https://nominatim.openstreetmap.org
+      - key: NOMINATIM_USER_AGENT
+        value: WeatherGPT/2.0 (sih-weathergpt-backend)
