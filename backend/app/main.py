@@ -154,29 +154,15 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 # ---------------------------------------------------------------------------
 
 allowed_origins = settings.get_cors_origins()
-if allowed_origins:
-    logger.info("CORS: allowing origins: %s", allowed_origins)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    # No specific origins configured — allow all (safe for public read-only API;
-    # auth is JWT-based so wildcard CORS is acceptable here)
-    logger.warning(
-        "CORS_ORIGINS is not set — allowing all origins (*). "
-        "Set CORS_ORIGINS=https://your-frontend.vercel.app in production."
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,   # credentials not allowed with wildcard
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+logger.info("CORS: configured origins: %s (also permitting http/https origins via regex)", allowed_origins)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins if allowed_origins else ["*"],
+    allow_origin_regex=r"^https?://.*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Security Headers Middleware

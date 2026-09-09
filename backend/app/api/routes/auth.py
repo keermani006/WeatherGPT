@@ -108,8 +108,22 @@ async def register_user(req: RegisterRequest):
     pw_hash, salt = _hash_password(req.password)
 
     if sb:
+        # Pre-check if user already exists in Supabase
         try:
-            # Try admin user creation first to auto-confirm email for immediate login
+            users = sb.auth.admin.list_users()
+            existing = next((u for u in users if (u.email or "").lower() == email), None)
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": {"code": "USER_ALREADY_EXISTS", "message": "A user with this email already exists."}},
+                )
+        except HTTPException:
+            raise
+        except Exception as check_err:
+            logger.debug("Supabase list_users check non-fatal: %s", check_err)
+
+        try:
+            # Create user with auto-confirmed email so immediate login works without email verification delay
             res = sb.auth.admin.create_user({
                 "email": email,
                 "password": req.password,
@@ -131,6 +145,8 @@ async def register_user(req: RegisterRequest):
                 token_type="bearer",
                 user=AuthUserData(id=user_id, email=user_email, name=req.name, role="authenticated"),
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             err_msg = str(exc).lower()
             if "already" in err_msg or "registered" in err_msg or "exists" in err_msg:
@@ -138,12 +154,17 @@ async def register_user(req: RegisterRequest):
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={"error": {"code": "USER_ALREADY_EXISTS", "message": "A user with this email already exists."}},
                 )
-            logger.warning("Supabase admin create_user failed, falling back to sign_up or local: %s", exc)
+            logger.warning("Supabase admin create_user failed, trying sign_up: %s", exc)
             try:
                 res = sb.auth.sign_up({"email": email, "password": req.password})
                 if res.user:
                     user_id = str(res.user.id)
-                    token = create_access_token(user_id=user_id, email=email)
+                    # Attempt to auto-confirm user so subsequent logins succeed
+                    try:
+                        sb.auth.admin.update_user_by_id(user_id, {"email_confirm": True})
+                    except Exception:
+                        pass
+                    token = getattr(res.session, "access_token", None) or create_access_token(user_id=user_id, email=email)
                     _IN_MEMORY_USERS[email] = {
                         "id": user_id,
                         "email": email,
@@ -165,6 +186,7 @@ async def register_user(req: RegisterRequest):
                         detail={"error": {"code": "USER_ALREADY_EXISTS", "message": "A user with this email already exists."}},
                     )
 
+    # Local fallback
     user_id = str(uuid.uuid4())
     _IN_MEMORY_USERS[email] = {
         "id": user_id,
@@ -181,7 +203,6 @@ async def register_user(req: RegisterRequest):
     )
 
 
-
 @router.post(
     "/login",
     response_model=AuthResponse,
@@ -193,12 +214,24 @@ async def login_user(req: LoginRequest):
     sb = get_supabase()
 
     if sb:
+        # Pre-check: if user exists in Supabase but their email is not confirmed,
+        # auto-confirm it now so Supabase will not reject an otherwise valid password!
+        try:
+            users = sb.auth.admin.list_users()
+            target_user = next((u for u in users if (u.email or "").lower() == email), None)
+            if target_user and target_user.email_confirmed_at is None:
+                logger.info("Auto-confirming email for user %s prior to password verification", email)
+                sb.auth.admin.update_user_by_id(target_user.id, {"email_confirm": True})
+        except Exception as precheck_err:
+            logger.debug("Pre-sign-in user confirmation check: %s", precheck_err)
+
+        # Attempt password sign in
         try:
             res = sb.auth.sign_in_with_password({"email": email, "password": req.password})
             if res.user:
                 user_id = str(res.user.id)
                 user_email = res.user.email or email
-                token = create_access_token(user_id=user_id, email=user_email)
+                token = getattr(res.session, "access_token", None) or create_access_token(user_id=user_id, email=user_email)
                 user_name = res.user.user_metadata.get("name") if res.user.user_metadata else None
                 return AuthResponse(
                     access_token=token,
@@ -206,7 +239,28 @@ async def login_user(req: LoginRequest):
                     user=AuthUserData(id=user_id, email=user_email, name=user_name, role="authenticated"),
                 )
         except Exception as exc:
-            logger.info("Supabase password sign in did not match or failed: %s", exc)
+            err_str = str(exc).lower()
+            logger.info("Supabase password sign in for %s failed: %s", email, exc)
+            # If Supabase still complains that email is not confirmed, confirm and retry once
+            if "email not confirmed" in err_str or "unconfirmed" in err_str:
+                try:
+                    users = sb.auth.admin.list_users()
+                    target_user = next((u for u in users if (u.email or "").lower() == email), None)
+                    if target_user:
+                        sb.auth.admin.update_user_by_id(target_user.id, {"email_confirm": True})
+                        retry_res = sb.auth.sign_in_with_password({"email": email, "password": req.password})
+                        if retry_res.user:
+                            user_id = str(retry_res.user.id)
+                            user_email = retry_res.user.email or email
+                            token = getattr(retry_res.session, "access_token", None) or create_access_token(user_id=user_id, email=user_email)
+                            user_name = retry_res.user.user_metadata.get("name") if retry_res.user.user_metadata else None
+                            return AuthResponse(
+                                access_token=token,
+                                token_type="bearer",
+                                user=AuthUserData(id=user_id, email=user_email, name=user_name, role="authenticated"),
+                            )
+                except Exception as retry_err:
+                    logger.warning("Retry after auto-confirm failed for %s: %s", email, retry_err)
 
     # Check fallback in-memory user registry
     user_record = _IN_MEMORY_USERS.get(email)
@@ -272,6 +326,7 @@ async def get_demo_token(body: Optional[DemoTokenRequest] = None):
 async def get_me(user: AuthUser = Depends(get_current_user)):
     return {
         "id": user.id,
+        "user_id": user.id,
         "email": user.email,
         "role": user.role,
     }

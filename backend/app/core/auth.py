@@ -72,13 +72,47 @@ def create_access_token(user_id: str, email: str = "demo@weathergpt.local", expi
 
 def _decode_jwt(token: str) -> dict:
     """
-    Decode and verify a Supabase JWT using the HS256 secret.
+    Decode and verify a JWT token.
+    Supports:
+      1. HS256 JWT tokens signed with SUPABASE_JWT_SECRET / local secret
+      2. ES256 / native tokens issued directly by Supabase Auth (via sb.auth.get_user)
 
     Raises:
         jwt.ExpiredSignatureError  → token has expired
         jwt.InvalidTokenError      → malformed or invalid signature
     """
     secret = _get_jwt_secret()
+
+    # Attempt 1: Direct HS256 decode if secret is available
+    if secret:
+        try:
+            return jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                options={"require": ["sub", "exp"], "verify_aud": False},
+            )
+        except jwt.ExpiredSignatureError:
+            raise
+        except (jwt.InvalidAlgorithmError, jwt.InvalidSignatureError, jwt.DecodeError):
+            pass
+
+    # Attempt 2: Supabase GoTrue Auth API verification (for ES256 / project-issued tokens)
+    try:
+        from app.core.database import get_supabase
+        sb = get_supabase()
+        if sb:
+            user_res = sb.auth.get_user(token)
+            if user_res and user_res.user:
+                return {
+                    "sub": str(user_res.user.id),
+                    "email": user_res.user.email or "",
+                    "role": user_res.user.role or "authenticated",
+                }
+    except Exception as exc:
+        logger.debug("Supabase token verification check failed: %s", exc)
+
+    # Attempt 3: If neither succeeded, raise appropriate error
     if not secret:
         raise RuntimeError("SUPABASE_JWT_SECRET is not configured")
 
