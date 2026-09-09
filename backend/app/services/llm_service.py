@@ -200,6 +200,8 @@ async def generate_weather_response(
 async def build_alert_suggestion(
     user_message: str,
     weather_data: WeatherData,
+    latitude: float = 0.0,
+    longitude: float = 0.0,
 ) -> Optional[AlertSuggestion]:
     """
     Detect alert intent from user message and build a pre-filled AlertSuggestion.
@@ -209,18 +211,36 @@ async def build_alert_suggestion(
     if not intent_data:
         return None
 
-    condition = intent_data.get("condition", "rain_probability")
-    threshold = float(intent_data.get("threshold", 70))
+    raw_cond = str(intent_data.get("condition", "rain_probability")).lower().strip()
+    if "rain" in raw_cond or "prob" in raw_cond:
+        condition = "rain_probability"
+    elif "temp" in raw_cond or "heat" in raw_cond or "cold" in raw_cond:
+        condition = "temperature"
+    elif "wind" in raw_cond or "storm" in raw_cond or "gust" in raw_cond:
+        condition = "wind_speed"
+    elif "precip" in raw_cond or "flood" in raw_cond:
+        condition = "precipitation"
+    else:
+        condition = "rain_probability"
 
-    # Map condition to a sensible default threshold if LLM returned 0
-    if threshold == 0:
-        defaults = {
-            "rain_probability": 70.0,
-            "temperature": 35.0,
-            "wind_speed": 40.0,
-            "precipitation": 10.0,
-        }
-        threshold = defaults.get(condition, 70.0)
+    try:
+        threshold = float(intent_data.get("threshold", 0))
+    except (ValueError, TypeError):
+        threshold = 0.0
+
+    # Map condition to a sensible default threshold if LLM returned 0 or invalid value
+    if condition == "rain_probability":
+        if threshold <= 0 or threshold > 100:
+            threshold = 70.0
+    elif condition == "temperature":
+        if threshold == 0 or threshold < -100 or threshold > 70:
+            threshold = 35.0
+    elif condition == "wind_speed":
+        if threshold <= 0:
+            threshold = 40.0
+    elif condition == "precipitation":
+        if threshold <= 0:
+            threshold = 10.0
 
     description_map = {
         "rain_probability": f"Alert when rain probability > {threshold:.0f}% in {weather_data.location}",
@@ -231,8 +251,8 @@ async def build_alert_suggestion(
 
     return AlertSuggestion(
         location_name=weather_data.location,
-        latitude=weather_data.temperature,  # Will be overridden in route
-        longitude=0.0,
+        latitude=latitude,
+        longitude=longitude,
         condition=condition,
         threshold=threshold,
         description=description_map.get(condition, f"Alert for {condition} in {weather_data.location}"),

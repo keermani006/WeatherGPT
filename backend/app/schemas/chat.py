@@ -119,6 +119,10 @@ class ChatResponse(BaseModel):
         default=None,
         description="Pre-filled alert params when user expresses alert intent.",
     )
+    created_alert: Optional[dict] = Field(
+        default=None,
+        description="The alert that was automatically created if user is authenticated.",
+    )
 
     model_config = {
         "json_schema_extra": {

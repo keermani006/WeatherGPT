@@ -69,7 +69,7 @@ const CONDITION_UNITS: Record<string, string> = {
 
 export default function ChatPage() {
   const { lat, lng, name: locationName, setLocation } = useLocationStore();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loginDemo } = useAuth();
 
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -151,15 +151,12 @@ export default function ChatPage() {
 
   // ── Create alert from suggestion ────────────────────────────────────────
   async function handleCreateAlert(suggestion: AlertSuggestion, msgIndex: number) {
-    if (!isAuthenticated) {
-      setMessages(prev => [...prev, {
-        role: "system",
-        content: "Please sign in to create weather alerts.",
-      }]);
-      return;
-    }
     setAlertCreating(String(msgIndex));
     try {
+      if (!isAuthenticated) {
+        // Seamlessly initialize demo/guest session so alert can be saved
+        await loginDemo();
+      }
       await createAlert({
         lat: suggestion.latitude,
         lng: suggestion.longitude,
@@ -170,7 +167,7 @@ export default function ChatPage() {
       setAlertCreated(prev => new Set([...prev, msgIndex]));
       setMessages(prev => [...prev, {
         role: "system",
-        content: `✅ Alert set! You'll be notified when ${CONDITION_LABELS[suggestion.condition] || suggestion.condition} ${suggestion.condition === "temperature" ? "goes below" : "exceeds"} ${suggestion.threshold}${CONDITION_UNITS[suggestion.condition] || ""} in ${suggestion.location_name}.`,
+        content: `✅ Alert active! You'll be notified when ${CONDITION_LABELS[suggestion.condition] || suggestion.condition} ${suggestion.condition === "temperature" ? "goes below" : "exceeds"} ${suggestion.threshold}${CONDITION_UNITS[suggestion.condition] || ""} in ${suggestion.location_name}.`,
       }]);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "Failed to create alert. Please try again.";
@@ -215,6 +212,10 @@ export default function ChatPage() {
         setLocation(lat ?? 0, lng ?? 0, response.location);
       }
 
+      const assistantMsgIndex = updatedMessages.length;
+      const createdAlert = (response as any).created_alert;
+      const alertSuggestion = (response as any).alert_suggestion;
+
       setMessages(prev => [
         ...prev,
         {
@@ -222,9 +223,24 @@ export default function ChatPage() {
           content: response.answer,
           weather_data: response.weather_data ?? undefined,
           destination_weather: (response as any).destination_weather ?? undefined,
-          alert_suggestion: (response as any).alert_suggestion ?? undefined,
+          alert_suggestion: alertSuggestion ?? undefined,
         },
       ]);
+
+      // If backend already created the alert:
+      if (createdAlert) {
+        setAlertCreated(prev => new Set([...prev, assistantMsgIndex]));
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "system",
+            content: `✅ Alert created! Monitored: ${CONDITION_LABELS[createdAlert.condition] || createdAlert.condition} (threshold: ${createdAlert.threshold}${CONDITION_UNITS[createdAlert.condition] || ""}) in ${createdAlert.location_name || "your location"}.`,
+          },
+        ]);
+      } else if (alertSuggestion) {
+        // Automatically save alert to backend!
+        handleCreateAlert(alertSuggestion, assistantMsgIndex);
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         const isGuardrail =
@@ -343,33 +359,46 @@ export default function ChatPage() {
                         </div>
                       )}
 
-                      {/* Alert suggestion card */}
-                      {msg.alert_suggestion && !alertCreated.has(i) && (
-                        <div className="border border-teal/30 bg-teal/5 px-4 py-3 space-y-2">
+                      {/* Alert suggestion / active card */}
+                      {msg.alert_suggestion && (
+                        <div className={`border px-4 py-3 space-y-2 transition-colors ${
+                          alertCreated.has(i)
+                            ? "border-teal/60 bg-teal/10"
+                            : "border-teal/30 bg-teal/5"
+                        }`}>
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <span className="font-mono text-[10px] uppercase tracking-widest text-teal font-semibold">
-                                Set Alert
+                              <span className="font-mono text-[10px] uppercase tracking-widest text-teal font-semibold flex items-center gap-1.5">
+                                {alertCreated.has(i) ? "✓ Alert Active" : "Set Alert"}
                               </span>
-                              <p className="font-sans text-xs text-ink/70 mt-0.5">
+                              <p className="font-sans text-xs text-ink/80 mt-0.5 font-medium">
                                 {msg.alert_suggestion.description}
                               </p>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => handleCreateAlert(msg.alert_suggestion!, i)}
-                              disabled={alertCreating === String(i)}
-                              className="shrink-0 px-3 py-1.5 text-xs font-sans font-medium bg-teal text-paper hover:bg-teal/90 disabled:bg-ink/20 transition-colors flex items-center gap-1.5"
-                            >
-                              {alertCreating === String(i) ? (
-                                <>
-                                  <span className="w-3 h-3 border-2 border-paper/30 border-t-paper rounded-full animate-spin" />
-                                  <span>Creating…</span>
-                                </>
-                              ) : (
-                                "🔔 Create Alert"
-                              )}
-                            </button>
+                            {alertCreated.has(i) ? (
+                              <Link
+                                href="/alerts"
+                                className="shrink-0 px-3 py-1.5 text-xs font-sans font-medium bg-teal/20 text-teal hover:bg-teal/30 transition-colors flex items-center gap-1"
+                              >
+                                View Alerts →
+                              </Link>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleCreateAlert(msg.alert_suggestion!, i)}
+                                disabled={alertCreating === String(i)}
+                                className="shrink-0 px-3 py-1.5 text-xs font-sans font-medium bg-teal text-paper hover:bg-teal/90 disabled:bg-ink/20 transition-colors flex items-center gap-1.5"
+                              >
+                                {alertCreating === String(i) ? (
+                                  <>
+                                    <span className="w-3 h-3 border-2 border-paper/30 border-t-paper rounded-full animate-spin" />
+                                    <span>Creating…</span>
+                                  </>
+                                ) : (
+                                  "🔔 Create Alert"
+                                )}
+                              </button>
+                            )}
                           </div>
                           <div className="flex items-center gap-3 text-[11px] font-mono text-ink/50">
                             <span>{CONDITION_LABELS[msg.alert_suggestion.condition] || msg.alert_suggestion.condition}</span>

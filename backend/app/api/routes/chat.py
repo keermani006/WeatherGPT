@@ -227,8 +227,14 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     # ── 8. Build alert suggestion & generate LLM response ─────────────────────
     alert_suggestion = None
+    created_alert = None
     try:
-        raw_alert = await build_alert_suggestion(body.message, weather_data)
+        raw_alert = await build_alert_suggestion(
+            body.message,
+            weather_data,
+            latitude=resolved.latitude,
+            longitude=resolved.longitude,
+        )
         if raw_alert and destination_weather and destination_resolved:
             alert_suggestion = AlertSuggestion(
                 location_name=destination_resolved.name,
@@ -241,14 +247,32 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 ),
             )
         elif raw_alert:
-            alert_suggestion = AlertSuggestion(
-                location_name=resolved.name,
-                latitude=resolved.latitude,
-                longitude=resolved.longitude,
-                condition=raw_alert.condition,
-                threshold=raw_alert.threshold,
-                description=raw_alert.description,
-            )
+            alert_suggestion = raw_alert
+
+        # If alert intent detected and request is authenticated, automatically create the alert
+        if alert_suggestion:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ", 1)[1]
+                try:
+                    from app.core.auth import _decode_jwt
+                    payload = _decode_jwt(token)
+                    user_id = payload.get("sub")
+                    if user_id:
+                        from app.schemas.alert import AlertRequest
+                        from app.services.alert_service import create_alert
+                        alert_req = AlertRequest(
+                            latitude=alert_suggestion.latitude,
+                            longitude=alert_suggestion.longitude,
+                            condition=alert_suggestion.condition,
+                            threshold=alert_suggestion.threshold,
+                            location_name=alert_suggestion.location_name,
+                        )
+                        alert_obj = await create_alert(alert_req, user_id=user_id)
+                        created_alert = alert_obj.model_dump()
+                        logger.info("Auto-created alert %s for user %s from chat query", alert_obj.id, user_id)
+                except Exception as auto_err:
+                    logger.warning("Could not auto-create alert from chat: %s", auto_err)
 
         answer = await generate_weather_response(
             user_question=body.message,
@@ -266,8 +290,8 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     elapsed = (time.perf_counter() - start) * 1000
     logger.info(
-        "Request completed in %.1f ms | location='%s' | travel=%s | alert=%s",
-        elapsed, resolved.name, destination_resolved is not None, alert_suggestion is not None,
+        "Request completed in %.1f ms | location='%s' | travel=%s | alert=%s | created=%s",
+        elapsed, resolved.name, destination_resolved is not None, alert_suggestion is not None, created_alert is not None,
     )
 
     return ChatResponse(
@@ -276,4 +300,5 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         weather_data=weather_data,
         destination_weather=destination_weather,
         alert_suggestion=alert_suggestion,
+        created_alert=created_alert,
     )

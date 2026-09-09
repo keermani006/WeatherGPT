@@ -241,6 +241,15 @@ export function sendChatMessage(params: {
       threshold: number;
       description: string;
     };
+    created_alert?: {
+      id: string;
+      latitude: number;
+      longitude: number;
+      condition: string;
+      threshold: number;
+      location_name: string | null;
+      active: boolean;
+    };
   }>("/api/v1/chat", {
     method: "POST",
     body: JSON.stringify({
