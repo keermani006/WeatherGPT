@@ -96,11 +96,48 @@ def _build_history_messages(history: Optional[List[HistoryMessage]]) -> list:
     return [{"role": m.role, "content": m.content} for m in recent]
 
 
+def _rule_based_alert_intent(user_message: str) -> Optional[dict]:
+    """Fast deterministic check for common alert keywords."""
+    msg = user_message.lower().strip()
+    alert_keywords = ["alert", "notify", "notification", "warn", "warning", "remind"]
+    if not any(kw in msg for kw in alert_keywords):
+        return None
+
+    if any(w in msg for w in ["rain", "shower", "downpour", "drizzle"]):
+        condition = "rain_probability"
+    elif any(w in msg for w in ["temp", "heat", "hot", "cold", "freeze", "warm"]):
+        condition = "temperature"
+    elif any(w in msg for w in ["wind", "gust", "storm", "cyclone", "breeze", "gale"]):
+        condition = "wind_speed"
+    elif any(w in msg for w in ["precip", "rainfall", "flood", "mm"]):
+        condition = "precipitation"
+    else:
+        condition = "rain_probability"
+
+    operator = "below" if any(w in msg for w in ["below", "under", "<", "less", "cold", "drop"]) else "above"
+
+    numbers = re.findall(r"\b\d+(?:\.\d+)?\b", msg)
+    threshold = float(numbers[-1]) if numbers else 0.0
+
+    return {
+        "intent": True,
+        "condition": condition,
+        "threshold": threshold,
+        "operator": operator,
+    }
+
+
 async def _detect_alert_intent(user_message: str) -> Optional[dict]:
     """
-    Ask LLM if the message contains alert intent.
-    Returns dict with intent/condition/threshold or None.
+    Detect if the message contains alert intent using fast rules first,
+    falling back to LLM completion for ambiguous phrasings.
     """
+    # 1. Fast deterministic check
+    fast_result = _rule_based_alert_intent(user_message)
+    if fast_result:
+        return fast_result
+
+    # 2. LLM fallback
     client = _get_groq_client()
     try:
         completion = await client.chat.completions.create(
@@ -113,14 +150,13 @@ async def _detect_alert_intent(user_message: str) -> Optional[dict]:
             max_tokens=100,
         )
         raw = completion.choices[0].message.content or ""
-        # Extract JSON from response
-        match = re.search(r'\{.*\}', raw.strip(), re.DOTALL)
+        match = re.search(r"\{.*\}", raw.strip(), re.DOTALL)
         if match:
             data = json.loads(match.group())
             if data.get("intent") is True:
                 return data
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Alert intent detection failed: %s", exc)
+        logger.warning("Alert intent detection fallback failed: %s", exc)
     return None
 
 

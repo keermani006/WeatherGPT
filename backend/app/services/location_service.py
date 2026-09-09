@@ -47,6 +47,9 @@ _STOP_WORDS = {
     "here", "there", "today", "tomorrow", "tonight", "now",
     "the morning", "this morning", "the afternoon", "this afternoon",
     "the evening", "this evening", "the weekend", "this weekend",
+    "rain", "rainy", "snow", "snowy", "wind", "windy", "temperature", "temp",
+    "storm", "stormy", "hail", "fog", "foggy", "sun", "sunny", "clouds", "cloudy",
+    "showers", "precipitation", "weather", "forecast", "alert", "alerts",
 }
 
 

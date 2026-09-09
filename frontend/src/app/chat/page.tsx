@@ -216,6 +216,19 @@ export default function ChatPage() {
       const createdAlert = (response as any).created_alert;
       const alertSuggestion = (response as any).alert_suggestion;
 
+      const effectiveSuggestion: AlertSuggestion | undefined =
+        alertSuggestion ||
+        (createdAlert
+          ? {
+              location_name: createdAlert.location_name || response.location,
+              latitude: createdAlert.latitude,
+              longitude: createdAlert.longitude,
+              condition: createdAlert.condition,
+              threshold: createdAlert.threshold,
+              description: `Alert when ${CONDITION_LABELS[createdAlert.condition] || createdAlert.condition} reaches threshold in ${createdAlert.location_name || response.location}`,
+            }
+          : undefined);
+
       setMessages(prev => [
         ...prev,
         {
@@ -223,7 +236,7 @@ export default function ChatPage() {
           content: response.answer,
           weather_data: response.weather_data ?? undefined,
           destination_weather: (response as any).destination_weather ?? undefined,
-          alert_suggestion: alertSuggestion ?? undefined,
+          alert_suggestion: effectiveSuggestion,
         },
       ]);
 
@@ -234,12 +247,12 @@ export default function ChatPage() {
           ...prev,
           {
             role: "system",
-            content: `✅ Alert created! Monitored: ${CONDITION_LABELS[createdAlert.condition] || createdAlert.condition} (threshold: ${createdAlert.threshold}${CONDITION_UNITS[createdAlert.condition] || ""}) in ${createdAlert.location_name || "your location"}.`,
+            content: `✅ Alert active! Monitored: ${CONDITION_LABELS[createdAlert.condition] || createdAlert.condition} (threshold: ${createdAlert.threshold}${CONDITION_UNITS[createdAlert.condition] || ""}) in ${createdAlert.location_name || "your location"}.`,
           },
         ]);
-      } else if (alertSuggestion) {
+      } else if (effectiveSuggestion) {
         // Automatically save alert to backend!
-        handleCreateAlert(alertSuggestion, assistantMsgIndex);
+        handleCreateAlert(effectiveSuggestion, assistantMsgIndex);
       }
     } catch (err) {
       if (err instanceof ApiError) {
