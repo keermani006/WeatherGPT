@@ -149,35 +149,40 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # ---------------------------------------------------------------------------
+# CORS Middleware  (must be added BEFORE SecurityHeadersMiddleware so that
+# Starlette wraps it outermost and handles OPTIONS preflights first)
+# ---------------------------------------------------------------------------
+
+allowed_origins = settings.get_cors_origins()
+if allowed_origins:
+    logger.info("CORS: allowing origins: %s", allowed_origins)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # No specific origins configured — allow all (safe for public read-only API;
+    # auth is JWT-based so wildcard CORS is acceptable here)
+    logger.warning(
+        "CORS_ORIGINS is not set — allowing all origins (*). "
+        "Set CORS_ORIGINS=https://your-frontend.vercel.app in production."
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,   # credentials not allowed with wildcard
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# ---------------------------------------------------------------------------
 # Security Headers Middleware
 # ---------------------------------------------------------------------------
 
 app.add_middleware(SecurityHeadersMiddleware)
-
-# ---------------------------------------------------------------------------
-# CORS Middleware
-# ---------------------------------------------------------------------------
-
-allowed_origins = settings.get_cors_origins()
-if not allowed_origins:
-    # Log a loud warning but refuse to use ["*"] — require explicit config
-    logger.warning(
-        "CORS_ORIGINS is not configured. Defaulting to localhost dev origins only. "
-        "Set CORS_ORIGINS in production to the actual frontend domain."
-    )
-    allowed_origins = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8080",
-    ]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ---------------------------------------------------------------------------
 # API Routers (/api/v1)
