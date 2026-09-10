@@ -50,71 +50,161 @@ _STOP_WORDS = {
     "rain", "rainy", "snow", "snowy", "wind", "windy", "temperature", "temp",
     "storm", "stormy", "hail", "fog", "foggy", "sun", "sunny", "clouds", "cloudy",
     "showers", "precipitation", "weather", "forecast", "alert", "alerts",
+    "humidity", "conditions", "current location", "my location", "device location",
+    "safe", "okay", "ok", "good", "bad",
+}
+
+_EXCLUDED_STANDALONE = {
+    "weather", "forecast", "rain", "temperature", "temp", "today", "tomorrow",
+    "tonight", "now", "what", "how", "is", "will", "write", "code", "python",
+    "tell", "joke", "explain", "assignment", "who", "why", "hello", "hi", "hey",
+    "safe", "okay", "good", "bad",
 }
 
 
-def extract_location_from_message(message: str | None) -> Optional[str]:
-    """Extract a place name from questions like 'weather in Chennai' or standalone 'Paris'."""
-    if not message:
+def clean_place_name(name: Optional[str]) -> Optional[str]:
+    """Clean and validate an extracted place name candidate."""
+    if not name:
         return None
-    cleaned = message.strip().rstrip("?.!").strip()
-    match = re.search(
+    cleaned = name.strip().rstrip("?.!,").strip()
+    # Strip trailing temporal words or qualifiers
+    cleaned = re.sub(
+        r"\s+(?:tonight|today|tomorrow|now|this\s+\w+|next\s+\w+|safe|safely|considering.*)$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not cleaned or len(cleaned) < 2 or cleaned.lower() in _STOP_WORDS:
+        return None
+    return cleaned
+
+
+def extract_route_info(message: str | None) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract (origin, destination) from travel/route messages.
+    e.g.:
+      - "drive from Hyderabad to Pune tonight" -> ("Hyderabad", "Pune")
+      - "travel from Delhi to Mumbai" -> ("Delhi", "Mumbai")
+      - "route between Hyderabad and Pune" -> ("Hyderabad", "Pune")
+      - "drive to Pune" -> (None, "Pune")
+      - "is it safe to travel to Delhi now?" -> (None, "Delhi")
+    """
+    if not message:
+        return None, None
+    msg = message.strip()
+
+    # 1. "from X to Y" (with optional travel/drive verbs)
+    from_to_match = re.search(
+        r"\b(?:drive|driving|travel|traveling|travelling|ride|riding|commute|commuting|transport|transporting|trucks?|trip|deliver|delivering|route)?\s*"
+        r"\bfrom\s+([A-Za-z\s,-]+?)\s+to\s+([A-Za-z\s,-]+?)"
+        r"(?=[.,;!?]|\s+(?:tonight|today|tomorrow|now|safe|safely|route|considering|with|on|for|this|next)|$)",
+        msg,
+        re.IGNORECASE,
+    )
+    if from_to_match:
+        orig = clean_place_name(from_to_match.group(1))
+        dest = clean_place_name(from_to_match.group(2))
+        if dest:
+            return orig, dest
+
+    # 2. "between X and Y"
+    between_match = re.search(
+        r"\bbetween\s+([A-Za-z\s,-]+?)\s+and\s+([A-Za-z\s,-]+?)"
+        r"(?=[.,;!?]|\s+(?:tonight|today|tomorrow|now|safe|safely|route|considering|with|on|for|this|next)|$)",
+        msg,
+        re.IGNORECASE,
+    )
+    if between_match:
+        orig = clean_place_name(between_match.group(1))
+        dest = clean_place_name(between_match.group(2))
+        if orig and dest:
+            return orig, dest
+
+    # 3. Destination only ("drive to Pune", "travel to Delhi", "trip to Mumbai")
+    dest_patterns = [
+        re.compile(
+            r"\b(?:travel(?:ling|ing)?|go(?:ing)?|drive|driving|trip|visit(?:ing)?|flight|head(?:ing)?)\s+to\s+([A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:now|today|tomorrow|tonight|safe|okay|ok|good|considering)|\?|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bvisit(?:ing)?\s+([A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:now|today|tomorrow|tonight|safe|okay|ok|good)|\?|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bfrom\s+(?:here|current\s+location|my\s+location)\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok)|\?|$)",
+            re.IGNORECASE,
+        ),
+    ]
+    for pat in dest_patterns:
+        m = pat.search(msg)
+        if m:
+            dest = clean_place_name(m.group(1))
+            if dest:
+                return None, dest
+
+    return None, None
+
+
+def extract_travel_destination(message: str | None) -> Optional[str]:
+    """Extract destination place name from travel/route query."""
+    _, dest = extract_route_info(message)
+    return dest
+
+
+def extract_locations_from_message(message: str | None) -> list[str]:
+    """Extract all candidate place names mentioned in the message."""
+    if not message:
+        return []
+    cleaned = message.strip()
+
+    # Route locations take priority
+    orig, dest = extract_route_info(cleaned)
+    results = []
+    if orig:
+        results.append(orig)
+    if dest and dest not in results:
+        results.append(dest)
+    if results:
+        return results
+
+    # General in/at/for pattern across entire message (e.g. "farms paddy in Andhra Pradesh. How will...")
+    matches = re.finditer(
+        r"\b(?:in|at|for|around|near)\s+([A-Z][A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:today|tomorrow|tonight|now|this|next|how|will|what|where|why|and|or|is|are|with|considering)|$)",
+        cleaned,
+    )
+    found = []
+    for m in matches:
+        loc = clean_place_name(m.group(1))
+        if loc and loc not in found and loc.lower() not in _STOP_WORDS:
+            found.append(loc)
+    if found:
+        return found
+
+    # Fallback: end-of-string in/at/for (case-insensitive for lowercase input like "in chennai")
+    eos_match = re.search(
         r"\b(?:in|at|for)\s+([A-Za-z\s,-]+?)(?:\s+(?:today|tomorrow|tonight|now|this\s+\w+|next\s+\w+))?$",
         cleaned,
         re.IGNORECASE,
     )
-    if match:
-        loc = match.group(1).strip()
-        if loc.lower() not in _STOP_WORDS:
-            return loc
+    if eos_match:
+        loc = clean_place_name(eos_match.group(1))
+        if loc:
+            return [loc]
 
-    # Standalone 1-3 word place name candidate (e.g. 'London', 'Paris', 'San Francisco', 'New York')
-    words = cleaned.split()
+    # Standalone 1-3 words
+    words = cleaned.rstrip("?.!").split()
     if 1 <= len(words) <= 3:
         words_lower = set(w.lower() for w in words)
-        _EXCLUDED = {
-            "weather", "forecast", "rain", "temperature", "temp", "today", "tomorrow",
-            "tonight", "now", "what", "how", "is", "will", "write", "code", "python",
-            "tell", "joke", "explain", "assignment", "who", "why", "hello", "hi", "hey"
-        }
-        if not (words_lower & _STOP_WORDS) and not (words_lower & _EXCLUDED):
-            return cleaned
+        if not (words_lower & _STOP_WORDS) and not (words_lower & _EXCLUDED_STANDALONE):
+            return [cleaned.rstrip("?.!").strip()]
 
-    return None
+    return []
 
 
-# Travel patterns — "travel to X", "go to X", "from X to Y", "trip to X"
-_TRAVEL_TO_PATTERNS = [
-    re.compile(r"\btravel(?:ling|ing)?\s+(?:from\s+\S+\s+)?to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\bgo(?:ing)?\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\btrip\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\bvisit(?:ing)?\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\bflight\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\bhead(?:ing)?\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok|good)|\?|$)", re.IGNORECASE),
-    re.compile(r"\bfrom\s+(?:here|current\s+location|my\s+location)\s+to\s+([A-Za-z\s,]+?)(?:\s+(?:now|today|safe|okay|ok)|\?|$)", re.IGNORECASE),
-]
-
-_TRAVEL_STOP = {"now", "today", "safe", "okay", "ok", "good", "bad", "from", "here", "my"}
-
-
-def extract_travel_destination(message: str | None) -> Optional[str]:
-    """
-    Extract travel destination from messages like:
-      - "Is it okay to travel to Delhi now?"
-      - "Should I go to Mumbai today?"
-      - "Is it safe to travel from current location to Bangalore?"
-    Returns the destination city name, or None if no travel intent found.
-    """
-    if not message:
-        return None
-    for pattern in _TRAVEL_TO_PATTERNS:
-        match = pattern.search(message)
-        if match:
-            dest = match.group(1).strip().rstrip("?.!,").strip()
-            # Filter out stop words / garbage
-            if dest and dest.lower() not in _TRAVEL_STOP and len(dest) > 1:
-                return dest
-    return None
+def extract_location_from_message(message: str | None) -> Optional[str]:
+    """Extract primary place name from user message."""
+    locs = extract_locations_from_message(message)
+    return locs[0] if locs else None
 
 
 
@@ -276,12 +366,16 @@ async def resolve_location(
     message: Optional[str] = None,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
+    prefer_message: bool = True,
 ) -> Optional[ResolvedLocation]:
     """
     Resolve coordinates following priority rules:
-      1. Explicit location from request or extracted from query (ignoring placeholder labels).
-      2. Browser GPS coordinates.
-      3. Neither available → return None.
+      1. If prefer_message and message contains a specific place or route origin,
+         resolve that location.
+      2. Explicit location from request (ignoring placeholder labels).
+      3. Extracted location from message (if not checked in step 1).
+      4. Browser GPS coordinates.
+      5. Neither available → return None.
     """
     _PLACEHOLDER_NAMES = {
         "current location", "current", "my location", "here",
@@ -292,15 +386,23 @@ async def resolve_location(
     if clean_explicit.lower() in _PLACEHOLDER_NAMES:
         clean_explicit = ""
 
+    if prefer_message and message:
+        route_orig, _ = extract_route_info(message)
+        extracted = route_orig or extract_location_from_message(message)
+        if extracted:
+            lat, lon, display_name = await geocode_location(extracted)
+            return ResolvedLocation(name=display_name, latitude=lat, longitude=lon, source="extracted")
+
     if clean_explicit:
         loc_name = clean_explicit[:_MAX_QUERY_LENGTH]
         lat, lon, display_name = await geocode_location(loc_name)
         return ResolvedLocation(name=display_name, latitude=lat, longitude=lon, source="explicit")
 
-    extracted = extract_location_from_message(message)
-    if extracted:
-        lat, lon, display_name = await geocode_location(extracted)
-        return ResolvedLocation(name=display_name, latitude=lat, longitude=lon, source="extracted")
+    if message and not prefer_message:
+        extracted = extract_location_from_message(message)
+        if extracted:
+            lat, lon, display_name = await geocode_location(extracted)
+            return ResolvedLocation(name=display_name, latitude=lat, longitude=lon, source="extracted")
 
     if latitude is not None and longitude is not None:
         display_name = await reverse_geocode(latitude, longitude)

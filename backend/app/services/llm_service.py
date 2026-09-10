@@ -47,15 +47,22 @@ You are WeatherGPT, an intelligent conversational weather assistant integrated i
 Your capabilities:
 1. Answer weather questions using the structured weather data supplied in the JSON block(s).
 2. Assist with meteorological alerts. WeatherGPT has a built-in alert system that lets users create automated threshold alerts for rain, temperature, wind, and precipitation. When a user asks to set, add, create, or notify them about weather conditions (e.g. "add an alert if it rains", "notify me if wind > 50"), ALWAYS confirm that you have prepared an alert card for them directly below your response so they can activate it with one click. NEVER say "I cannot set alerts" or "I cannot send notifications" — WeatherGPT provides the interactive alert card right in this interface!
-3. For travel questions (from A to B): compare weather at both locations and give a clear travel recommendation.
+3. For travel, driving, logistics, and trucking questions (e.g., from City A to City B, or highway driving):
+   - Compare weather conditions at both origin and destination.
+   - Evaluate driving risks: rain, wet highways, wind, and fog.
+   - Fog risk: High relative humidity (>80%) combined with cool night temperatures and low wind (<2.5 m/s) indicates elevated fog and reduced road visibility. Advise appropriate driving precautions (fog lights, safe distance, transit timing for perishable goods).
+4. For agriculture, farming, crop management, and gardening questions (e.g., paddy, crops, terrace/urban gardens, pest/disease control):
+   - Correlate humidity, temperature, and rain with plant health and agronomy.
+   - High humidity (>70-80%) and persistent rain create high risk for fungal pathogens (e.g., blast, sheath blight, root rot, powdery mildew) and favor certain insect pests.
+   - Advise on irrigation (skip watering during rain events) and spray timing (avoid applying pesticides/fertilizers right before rain to prevent runoff).
+   - Address both large-scale farm needs and urban garden needs when both locations/contexts are mentioned.
+5. Multi-location queries: When data for two locations (origin/destination or city/farm) is provided, address BOTH clearly.
 
 STRICT RULES:
-1. Use ONLY the weather data in the JSON block(s) provided. Do not invent or hallucinate values.
-2. If data is insufficient, say so clearly. Do not guess.
-3. Keep answers concise, friendly, and clear. Target 2-4 sentences.
-4. For dangerous conditions (extreme heat, storms, flooding), advise users to stay safe and follow official warnings.
-5. Use probabilistic language for future weather ("there is a high chance of showers", "rain is likely").
-6. You have access to conversation history — use it to give contextual, coherent responses.
+1. Base all numerical weather assessments on the provided JSON blocks (current weather, 7-day forecast, and tonight conditions). Do not fabricate numbers.
+2. Provide concise, clear, and highly actionable advice (typically 3-6 sentences).
+3. For dangerous weather (storms, flash floods, dense fog), prioritize user and cargo safety.
+4. You have access to conversation history — use it to give contextual, coherent responses.
 """
 
 _ALERT_DETECTION_PROMPT = """\
@@ -80,11 +87,27 @@ If NO alert intent, respond with ONLY: {"intent": false}
 """
 
 
-def _weather_block(weather_data: WeatherData, label: str = "Weather data") -> str:
-    return (
-        f"{label} (authoritative — do not modify or supplement):\n"
-        f"```json\n{json.dumps(weather_data.model_dump(exclude_none=True), indent=2)}\n```"
-    )
+def _weather_block(
+    weather_data: WeatherData,
+    label: str = "Weather data",
+    forecast_summary: Optional[list] = None,
+    tonight_summary: Optional[dict] = None,
+) -> str:
+    parts = [
+        f"{label} (authoritative — do not modify or supplement):",
+        f"```json\n{json.dumps(weather_data.model_dump(exclude_none=True), indent=2)}\n```",
+    ]
+    if tonight_summary:
+        parts.append(
+            f"Tonight's conditions for {weather_data.location}:\n"
+            f"```json\n{json.dumps(tonight_summary, indent=2)}\n```"
+        )
+    if forecast_summary:
+        parts.append(
+            f"7-Day daily forecast for {weather_data.location}:\n"
+            f"```json\n{json.dumps(forecast_summary, indent=2)}\n```"
+        )
+    return "\n\n".join(parts)
 
 
 def _build_history_messages(history: Optional[List[HistoryMessage]]) -> list:
@@ -166,6 +189,10 @@ async def generate_weather_response(
     history: Optional[List[HistoryMessage]] = None,
     destination_weather: Optional[WeatherData] = None,
     alert_suggestion: Optional[AlertSuggestion] = None,
+    forecast_summary: Optional[list] = None,
+    destination_forecast_summary: Optional[list] = None,
+    tonight_summary: Optional[dict] = None,
+    destination_tonight_summary: Optional[dict] = None,
 ) -> str:
     """
     Call Groq and return its answer as a plain string.
@@ -176,6 +203,10 @@ async def generate_weather_response(
         history: Conversation history for context
         destination_weather: Destination weather for travel queries
         alert_suggestion: Structured alert suggestion if alert intent was detected
+        forecast_summary: 7-day daily forecast summary for primary location
+        destination_forecast_summary: 7-day daily forecast summary for destination
+        tonight_summary: Tonight's weather/fog/rain summary for primary location
+        destination_tonight_summary: Tonight's weather/fog/rain summary for destination
     """
     max_len = settings.max_message_length
     if len(user_question) > max_len:
@@ -185,11 +216,11 @@ async def generate_weather_response(
     # Build weather context block(s)
     if destination_weather:
         weather_context = (
-            f"{_weather_block(weather_data, 'Origin weather')}\n\n"
-            f"{_weather_block(destination_weather, 'Destination weather')}"
+            f"{_weather_block(weather_data, 'Origin / Primary weather', forecast_summary, tonight_summary)}\n\n"
+            f"{_weather_block(destination_weather, 'Destination / Secondary weather', destination_forecast_summary, destination_tonight_summary)}"
         )
     else:
-        weather_context = _weather_block(weather_data)
+        weather_context = _weather_block(weather_data, "Primary weather", forecast_summary, tonight_summary)
 
     alert_note = ""
     if alert_suggestion:

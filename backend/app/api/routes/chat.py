@@ -43,6 +43,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _TOMORROW_KEYWORDS = ["tomorrow", "next day", "day after today"]
+_FORECAST_KEYWORDS = [
+    "week", "weekly", "forecast", "days", "next few days", "coming days",
+    "next week", "agriculture", "agricultural", "farming", "farm", "crops",
+    "crop", "paddy", "harvest", "pest", "fungus", "irrigate", "irrigation",
+    "spoilage", "outlook",
+]
+_TONIGHT_KEYWORDS = ["tonight", "night", "overnight", "this evening", "late night", "fog"]
 
 
 def _is_tomorrow_question(message: str) -> bool:
@@ -50,7 +57,20 @@ def _is_tomorrow_question(message: str) -> bool:
     return any(kw in lower for kw in _TOMORROW_KEYWORDS)
 
 
-def _build_fallback_answer(weather_data: WeatherData, destination: Optional[WeatherData] = None) -> str:
+def _is_forecast_question(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in _FORECAST_KEYWORDS)
+
+
+def _is_tonight_question(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in _TONIGHT_KEYWORDS)
+
+
+def _build_fallback_answer(
+    weather_data: WeatherData,
+    destination: Optional[WeatherData] = None,
+) -> str:
     """Produce a structured plain-text answer when the LLM is unavailable."""
     lines = [
         f"Current weather in {weather_data.location}:",
@@ -132,11 +152,20 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         )
 
     # ── 2. Guardrail ─────────────────────────────────────────────────────────
-    from app.services.location_service import extract_location_from_message
+    from app.services.location_service import (
+        extract_location_from_message,
+        extract_locations_from_message,
+        extract_route_info,
+        extract_travel_destination,
+    )
+    route_orig, route_dest = extract_route_info(body.message)
+    travel_dest_name = route_dest or extract_travel_destination(body.message)
+    msg_locs = extract_locations_from_message(body.message)
+
     has_location_intent = bool(
         body.location
-        or extract_location_from_message(body.message)
-        or extract_travel_destination(body.message)
+        or msg_locs
+        or travel_dest_name
     )
     if not is_weather_related(body.message) and not has_location_intent:
         logger.info("Request rejected by guardrail | message='%s'", body.message[:80])
@@ -145,11 +174,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             detail="I can only help with weather-related questions.",
         )
 
-    # ── 3. Detect travel intent ───────────────────────────────────────────────
-    travel_dest_name = extract_travel_destination(body.message)
-    logger.info("Travel destination extracted: %s", travel_dest_name)
-
-    # ── 4. Resolve primary location ───────────────────────────────────────────
+    # ── 3. Resolve primary location ──────────────────────────────────────────
     try:
         resolved = await resolve_location(
             explicit=body.location,
@@ -178,11 +203,21 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     logger.info("Primary location resolved: '%s' (source=%s)", resolved.name, resolved.source)
 
-    # ── 5. Resolve travel destination (if any) ────────────────────────────────
+    # ── 4. Resolve secondary/destination location (if any) ───────────────────
+    secondary_query = None
+    if route_dest:
+        secondary_query = route_dest
+    elif travel_dest_name:
+        secondary_query = travel_dest_name
+    elif len(msg_locs) >= 2 and msg_locs[1].lower() not in resolved.name.lower():
+        secondary_query = msg_locs[1]
+    elif len(msg_locs) == 1 and body.location and body.location.strip().lower() not in resolved.name.lower():
+        secondary_query = body.location.strip()
+
     destination_resolved = None
-    if travel_dest_name:
+    if secondary_query:
         try:
-            dest_lat, dest_lon, dest_name = await geocode_location(travel_dest_name)
+            dest_lat, dest_lon, dest_name = await geocode_location(secondary_query)
             from app.services.location_service import ResolvedLocation
             destination_resolved = ResolvedLocation(
                 name=dest_name,
@@ -190,11 +225,11 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 longitude=dest_lon,
                 source="extracted",
             )
-            logger.info("Travel destination resolved: '%s'", dest_name)
+            logger.info("Secondary location resolved: '%s'", dest_name)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not resolve travel destination '%s': %s", travel_dest_name, exc)
+            logger.warning("Could not resolve secondary location '%s': %s", secondary_query, exc)
 
-    # ── 6. Fetch weather data ─────────────────────────────────────────────────
+    # ── 5. Fetch weather data ─────────────────────────────────────────────────
     for_tomorrow = _is_tomorrow_question(body.message)
     try:
         weather_data = await get_weather(
@@ -211,7 +246,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Weather service error.") from exc
 
-    # ── 7. Fetch destination weather (travel queries) ─────────────────────────
     destination_weather: Optional[WeatherData] = None
     if destination_resolved:
         try:
@@ -221,11 +255,87 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 location_name=destination_resolved.name,
                 for_tomorrow=for_tomorrow,
             )
-            logger.info("Destination weather fetched for '%s'", destination_resolved.name)
+            logger.info("Secondary weather fetched for '%s'", destination_resolved.name)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not fetch destination weather: %s", exc)
+            logger.warning("Could not fetch secondary weather: %s", exc)
 
-    # ── 8. Build alert suggestion & generate LLM response ─────────────────────
+    # ── 6. Fetch 7-day forecast and tonight condition details ────────────────
+    from app.services.weather_service import get_forecast
+
+    is_forecast = _is_forecast_question(body.message)
+    is_tonight = _is_tonight_question(body.message) or (route_dest is not None)
+
+    forecast_summary = None
+    destination_forecast_summary = None
+    tonight_summary = None
+    destination_tonight_summary = None
+
+    if is_forecast:
+        try:
+            f_resp = await get_forecast(resolved.latitude, resolved.longitude, resolved.name, days=7)
+            forecast_summary = [
+                {
+                    "date": d.date,
+                    "condition": d.condition,
+                    "max_temp_c": d.temperature_max,
+                    "min_temp_c": d.temperature_min,
+                    "rain_chance_pct": d.rain_probability,
+                    "precipitation_mm": d.precipitation,
+                    "wind_speed_ms": d.wind_speed,
+                }
+                for d in f_resp.forecast
+            ]
+        except Exception as f_err:
+            logger.warning("Could not fetch 7-day forecast for %s: %s", resolved.name, f_err)
+
+        if destination_resolved:
+            try:
+                dest_f_resp = await get_forecast(
+                    destination_resolved.latitude, destination_resolved.longitude, destination_resolved.name, days=7
+                )
+                destination_forecast_summary = [
+                    {
+                        "date": d.date,
+                        "condition": d.condition,
+                        "max_temp_c": d.temperature_max,
+                        "min_temp_c": d.temperature_min,
+                        "rain_chance_pct": d.rain_probability,
+                        "precipitation_mm": d.precipitation,
+                        "wind_speed_ms": d.wind_speed,
+                    }
+                    for d in dest_f_resp.forecast
+                ]
+            except Exception as f_err:
+                logger.warning("Could not fetch destination forecast for %s: %s", destination_resolved.name, f_err)
+
+    if is_tonight:
+        def _fog_assessment(hum: int, wind: float) -> str:
+            if hum >= 85 and wind <= 2.5:
+                return "HIGH (Dense fog or low mist likely overnight; reduced visibility)"
+            elif hum >= 75 and wind <= 3.5:
+                return "MODERATE (Patchy mist or morning fog possible)"
+            return "LOW (Good visibility expected)"
+
+        tonight_summary = {
+            "temperature_c": weather_data.temperature,
+            "humidity_pct": weather_data.humidity,
+            "wind_speed_ms": weather_data.wind_speed,
+            "condition": weather_data.condition,
+            "rain_probability_pct": weather_data.rain_probability,
+            "fog_risk": _fog_assessment(weather_data.humidity, weather_data.wind_speed),
+        }
+
+        if destination_weather:
+            destination_tonight_summary = {
+                "temperature_c": destination_weather.temperature,
+                "humidity_pct": destination_weather.humidity,
+                "wind_speed_ms": destination_weather.wind_speed,
+                "condition": destination_weather.condition,
+                "rain_probability_pct": destination_weather.rain_probability,
+                "fog_risk": _fog_assessment(destination_weather.humidity, destination_weather.wind_speed),
+            }
+
+    # ── 7. Build alert suggestion & generate LLM response ─────────────────────
     alert_suggestion = None
     created_alert = None
     try:
@@ -280,6 +390,10 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             history=body.history,
             destination_weather=destination_weather,
             alert_suggestion=alert_suggestion,
+            forecast_summary=forecast_summary,
+            destination_forecast_summary=destination_forecast_summary,
+            tonight_summary=tonight_summary,
+            destination_tonight_summary=destination_tonight_summary,
         )
     except httpx.TimeoutException:
         logger.warning("LLM timed out; returning structured fallback for '%s'", resolved.name)

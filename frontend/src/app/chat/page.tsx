@@ -11,6 +11,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { useLocationStore } from "@/lib/store";
 import { sendChatMessage, createAlert, getCurrentWeather, ApiError } from "@/lib/api";
 import { WeatherWidget } from "@/components/weather-widget";
