@@ -152,6 +152,15 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         )
 
     # ── 2. Guardrail ─────────────────────────────────────────────────────────
+    # NOTE: The guardrail runs unconditionally. A location in the message does
+    # NOT bypass it — "What's the population of Delhi?" is not weather-related.
+    if not is_weather_related(body.message):
+        logger.info("Request rejected by guardrail | message='%s'", body.message[:80])
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="I can only help with weather-related questions.",
+        )
+
     from app.services.location_service import (
         extract_location_from_message,
         extract_locations_from_message,
@@ -161,18 +170,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     route_orig, route_dest = extract_route_info(body.message)
     travel_dest_name = route_dest or extract_travel_destination(body.message)
     msg_locs = extract_locations_from_message(body.message)
-
-    has_location_intent = bool(
-        body.location
-        or msg_locs
-        or travel_dest_name
-    )
-    if not is_weather_related(body.message) and not has_location_intent:
-        logger.info("Request rejected by guardrail | message='%s'", body.message[:80])
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="I can only help with weather-related questions.",
-        )
 
     # ── 3. Resolve primary location ──────────────────────────────────────────
     try:
