@@ -69,13 +69,17 @@ async def async_retry(
                     if retry_after and retry_after.replace(".", "", 1).isdigit()
                     else (base_delay * (2 ** (attempt - 1)) + 0.75)
                 )
-                logger.warning(
-                    "Upstream HTTP 429 (Rate Limited) on attempt %d/%d — %s. Backing off for %.2fs",
-                    attempt, max_attempts, fn.__name__, delay,
-                )
                 if attempt < max_attempts:
+                    logger.warning(
+                        "Upstream HTTP 429 (Rate Limited) on attempt %d/%d — %s. Backing off for %.2fs",
+                        attempt, max_attempts, fn.__name__, delay,
+                    )
                     await asyncio.sleep(delay)
                     continue
+                logger.warning(
+                    "Upstream HTTP 429 (Rate Limited) on final attempt %d/%d — %s. Exhausted retries.",
+                    attempt, max_attempts, fn.__name__,
+                )
                 raise
             elif exc.response.status_code < 500:
                 # 4xx — client error, no point retrying

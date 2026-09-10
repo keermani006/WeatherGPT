@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     geo_timeout: int = 5
 
     # ── Rate Limiting (in-memory, per-process) ──────────────────────────────
-    # Format: "<count>/<period>" — e.g. "20/minute", "100/hour"
+    # Format: "<count>/<period>" — e.g. "120/minute", "100/hour"
     # NOTE: in-memory limits are per-process; suitable for single-instance SIH deployment.
     # For horizontal scaling, migrate to Redis-backed limits.
     rate_limit_chat: str = "120/minute"

@@ -55,5 +55,5 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) 
                 }
             }
         },
-        headers={"Retry-After": "60"},
+        headers={"Retry-After": "10"},
     )

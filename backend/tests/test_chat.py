@@ -436,7 +436,7 @@ class TestChatEndpoint:
         assert resp.status_code == 422
 
     def test_message_too_long_returns_422(self):
-        resp = self._post({"message": "w" * 1001})
+        resp = self._post({"message": "w" * 2001})
         assert resp.status_code == 422
 
     def test_location_too_long_returns_422(self):

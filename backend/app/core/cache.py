@@ -163,8 +163,13 @@ def _coords(lat: float, lon: float) -> str:
     return f"{lat:.2f}:{lon:.2f}"
 
 
+def bundle_weather_key(lat: float, lon: float) -> str:
+    return f"weather:bundle:{_coords(lat, lon)}"
+
+
 def current_weather_key(lat: float, lon: float) -> str:
     return f"weather:current:{_coords(lat, lon)}"
+
 
 
 def forecast_key(lat: float, lon: float, days: int) -> str:
