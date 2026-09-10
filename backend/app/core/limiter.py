@@ -27,8 +27,8 @@ from slowapi.errors import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
-# Global limiter instance — key function uses client IP address
-limiter = Limiter(key_func=get_remote_address)
+# Global limiter instance — disabled for now per user request
+limiter = Limiter(key_func=get_remote_address, enabled=False)
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:

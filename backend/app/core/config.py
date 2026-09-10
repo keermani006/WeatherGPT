@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     # ── Groq LLM ────────────────────────────────────────────────────────────
     groq_api_key: str
     groq_model: str = "qwen/qwen3.8-27b"
-    max_message_length: int = 1000
-    llm_max_output_tokens: int = 400
+    max_message_length: int = 2000
+    llm_max_output_tokens: int = 800
 
     # ── Open-Meteo Weather API ──────────────────────────────────────────────
     open_meteo_base_url: str = "https://api.open-meteo.com/v1"
@@ -64,9 +64,9 @@ class Settings(BaseSettings):
     # Format: "<count>/<period>" — e.g. "20/minute", "100/hour"
     # NOTE: in-memory limits are per-process; suitable for single-instance SIH deployment.
     # For horizontal scaling, migrate to Redis-backed limits.
-    rate_limit_chat: str = "20/minute"
-    rate_limit_location: str = "30/minute"
-    rate_limit_alerts: str = "20/minute"
+    rate_limit_chat: str = "120/minute"
+    rate_limit_location: str = "120/minute"
+    rate_limit_alerts: str = "120/minute"
 
     # ── Cache TTLs (seconds) ────────────────────────────────────────────────
     # In-memory TTL cache; lost on server restart (acceptable for SIH demo).

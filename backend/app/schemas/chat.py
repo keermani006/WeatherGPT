@@ -23,7 +23,7 @@ class ChatRequest(BaseModel):
     message: str = Field(
         ...,
         min_length=1,
-        max_length=1000,
+        max_length=2000,
         description="The user's natural-language weather question.",
         examples=["Will it rain tomorrow?"],
     )
