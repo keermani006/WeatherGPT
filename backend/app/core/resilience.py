@@ -61,7 +61,23 @@ async def async_retry(
         try:
             return await fn(*args, **kwargs)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code < 500:
+            if exc.response.status_code == 429:
+                last_exc = exc
+                retry_after = exc.response.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.replace(".", "", 1).isdigit()
+                    else (base_delay * (2 ** (attempt - 1)) + 0.75)
+                )
+                logger.warning(
+                    "Upstream HTTP 429 (Rate Limited) on attempt %d/%d — %s. Backing off for %.2fs",
+                    attempt, max_attempts, fn.__name__, delay,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            elif exc.response.status_code < 500:
                 # 4xx — client error, no point retrying
                 raise
             last_exc = exc

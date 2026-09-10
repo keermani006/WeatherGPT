@@ -37,6 +37,7 @@ class TTLCache:
     def __init__(self) -> None:
         # {key: (value, expires_at_monotonic)}
         self._store: Dict[str, Tuple[Any, float]] = {}
+        self._stale: Dict[str, Any] = {}
         # Single-flight: pending futures keyed by cache key
         self._inflight: Dict[str, asyncio.Event] = {}
         self._lock = asyncio.Lock()
@@ -65,19 +66,26 @@ class TTLCache:
         return value
 
     def set(self, key: str, value: Any, ttl: int) -> None:
-        """Store a value with a TTL in seconds."""
+        """Store a value with a TTL in seconds and keep stale copy."""
         if ttl <= 0:
             return
         self._store[key] = (value, time.monotonic() + ttl)
+        self._stale[key] = value
         logger.debug("Cache SET: %s (ttl=%ds)", key, ttl)
+
+    def get_stale(self, key: str) -> Optional[Any]:
+        """Return cached value even if expired (stale-if-error fallback)."""
+        return self._stale.get(key)
 
     def delete(self, key: str) -> None:
         """Remove a specific cache entry."""
         self._store.pop(key, None)
+        self._stale.pop(key, None)
 
     def clear(self) -> None:
         """Evict all entries (useful in tests)."""
         self._store.clear()
+        self._stale.clear()
         self._inflight.clear()
 
     def size(self) -> int:
@@ -92,6 +100,7 @@ class TTLCache:
         If the key is cached, return immediately.
         If another coroutine is already fetching the same key, wait for it.
         Otherwise, execute fetch_fn(), cache the result, and notify waiters.
+        If fetch_fn() fails, falls back to stale cache if available.
         """
         # Fast path: already cached
         value = self.get(key)
@@ -128,7 +137,11 @@ class TTLCache:
             value = await fetch_fn()
             self.set(key, value, ttl)
             return value
-        except Exception:
+        except Exception as exc:
+            stale = self.get_stale(key)
+            if stale is not None:
+                logger.warning("Upstream fetch failed for '%s' (%s); serving STALE cached data", key, exc)
+                return stale
             raise
         finally:
             async with self._lock:
