@@ -102,6 +102,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         settings.log_level,
         settings.alert_check_interval_minutes,
     )
+    from app.core.redis import close_redis_client, ping_redis
+    redis_ok = await ping_redis()
+    logger.info("Redis Cloud connection check: %s", "CONNECTED" if redis_ok else "NOT CONFIGURED / OFFLINE")
+
     scheduler_task = asyncio.create_task(
         _alert_scheduler_loop(settings.alert_check_interval_minutes)
     )
@@ -111,6 +115,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         await scheduler_task
     except asyncio.CancelledError:
         pass
+    await close_redis_client()
     logger.info("WeatherGPT shutting down cleanly")
 
 
@@ -181,6 +186,22 @@ app.include_router(alerts_router.router, prefix="/api/v1", tags=["Alerts"])
 app.include_router(climate_router.router, prefix="/api/v1", tags=["Climate"])
 app.include_router(auth_router.router, prefix="/api/v1", tags=["Auth"])
 
+# Alias routes for direct root paths
+app.add_api_route(
+    "/recent-locations",
+    location_router.get_user_recent_locations,
+    methods=["GET"],
+    tags=["Location"],
+    include_in_schema=False,
+)
+app.add_api_route(
+    "/api/v1/recent-locations",
+    location_router.get_user_recent_locations,
+    methods=["GET"],
+    tags=["Location"],
+    include_in_schema=False,
+)
+
 
 # ---------------------------------------------------------------------------
 # Health endpoints
@@ -206,13 +227,15 @@ async def health():
     summary="Readiness check",
     description=(
         "Returns 200 if the application is ready to serve traffic "
-        "(Supabase reachable). Returns 503 if a critical dependency is unavailable."
+        "(Supabase and Redis checked). Returns 503 if a critical dependency is unavailable."
     ),
 )
 async def health_ready():
-    """Check database connectivity for readiness probes."""
+    """Check database and Redis connectivity for readiness probes."""
     from app.core.database import get_supabase
-    checks = {"status": "ready", "version": settings.app_version, "database": "ok"}
+    from app.core.redis import ping_redis
+    checks = {"status": "ready", "version": settings.app_version, "database": "ok", "redis": "ok"}
+
     sb = get_supabase()
     if sb is None:
         checks["database"] = "not_configured"
@@ -221,9 +244,17 @@ async def health_ready():
             sb.table("alerts").select("id").limit(1).execute()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Readiness check: database unreachable — %s", exc)
-            from fastapi import Response
             checks["database"] = "unavailable"
             checks["status"] = "degraded"
+
+    if not settings.redis_url:
+        checks["redis"] = "not_configured"
+    else:
+        redis_alive = await ping_redis()
+        if not redis_alive:
+            checks["redis"] = "unavailable"
+            checks["status"] = "degraded"
+
     return checks
 
 

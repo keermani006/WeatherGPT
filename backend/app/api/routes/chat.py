@@ -214,6 +214,18 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     logger.info("Primary location resolved: '%s' (source=%s)", resolved.name, resolved.source)
 
+    # Save to user recent locations if authenticated
+    from app.core.auth import get_optional_current_user
+    auth_user = get_optional_current_user(request)
+    if auth_user and resolved and resolved.name:
+        from app.services.recent_locations_service import add_recent_location
+        await add_recent_location(
+            user_id=auth_user.id,
+            location_name=resolved.name,
+            latitude=resolved.latitude,
+            longitude=resolved.longitude,
+        )
+
     # ── 4. Resolve secondary/destination location (if any) ───────────────────
     secondary_query = None
     if route_dest and route_dest.lower() not in resolved.name.lower() and resolved.name.lower() not in route_dest.lower():

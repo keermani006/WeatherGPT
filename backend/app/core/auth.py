@@ -22,10 +22,10 @@ If SUPABASE_JWT_SECRET is not configured, protected endpoints return HTTP 503.
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import get_settings
@@ -210,3 +210,29 @@ async def get_current_user(
         email=payload.get("email", ""),
         role=payload.get("role", "authenticated"),
     )
+
+
+def get_optional_current_user(request: Request) -> Optional[AuthUser]:
+    """
+    Extract verified AuthUser if a valid Bearer token is present;
+    returns None if unauthenticated or token is invalid.
+    """
+    auth_header = request.headers.get("Authorization", "").strip()
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[7:].strip()
+    if not token:
+        return None
+    try:
+        payload = _decode_jwt(token)
+        user_id = payload.get("sub", "")
+        if user_id:
+            return AuthUser(
+                user_id=str(user_id),
+                email=payload.get("email", ""),
+                role=payload.get("role", "authenticated"),
+            )
+    except Exception:
+        return None
+    return None
+

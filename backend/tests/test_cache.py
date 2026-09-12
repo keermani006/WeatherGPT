@@ -1,10 +1,10 @@
 """
 tests/test_cache.py
 
-Tests for the in-memory TTLCache and single-flight request coalescing:
+Tests for Redis Cloud-backed TTLCache and single-flight request coalescing:
   - Cache set and get (hit vs miss)
   - Expiry: values expire after TTL
-  - Lazy eviction
+  - Zero / negative TTL
   - delete and clear
   - size calculation
   - Single-flight: concurrent fetches only invoke upstream once
@@ -12,7 +12,7 @@ Tests for the in-memory TTLCache and single-flight request coalescing:
 """
 
 import asyncio
-import time
+from unittest.mock import patch
 import pytest
 
 from app.core.cache import (
@@ -23,55 +23,63 @@ from app.core.cache import (
     climate_key,
     location_search_key,
 )
+from tests.fake_redis import FakeRedisAsync
+
+
+@pytest.fixture
+def fake_redis():
+    client = FakeRedisAsync()
+    with patch("app.core.cache.get_redis_client", return_value=client):
+        yield client
 
 
 @pytest.mark.asyncio
-async def test_cache_set_and_get():
+async def test_cache_set_and_get(fake_redis):
     cache = TTLCache()
-    cache.set("key1", "val1", ttl=60)
-    assert cache.get("key1") == "val1"
-    assert cache.get("key_missing") is None
+    await cache.set("key1", "val1", ttl=60)
+    assert await cache.get("key1") == "val1"
+    assert await cache.get("key_missing") is None
 
 
 @pytest.mark.asyncio
-async def test_cache_expiry():
+async def test_cache_expiry(fake_redis):
     cache = TTLCache()
     # TTL of 1 second
-    cache.set("short_lived", "data", ttl=1)
-    assert cache.get("short_lived") == "data"
+    await cache.set("short_lived", "data", ttl=1)
+    assert await cache.get("short_lived") == "data"
     # Wait for expiration
     await asyncio.sleep(1.05)
-    assert cache.get("short_lived") is None
+    assert await cache.get("short_lived") is None
 
 
 @pytest.mark.asyncio
-async def test_cache_zero_or_negative_ttl():
+async def test_cache_zero_or_negative_ttl(fake_redis):
     cache = TTLCache()
-    cache.set("no_ttl", "val", ttl=0)
-    assert cache.get("no_ttl") is None
-    cache.set("neg_ttl", "val", ttl=-10)
-    assert cache.get("neg_ttl") is None
+    await cache.set("no_ttl", "val", ttl=0)
+    assert await cache.get("no_ttl") is None
+    await cache.set("neg_ttl", "val", ttl=-10)
+    assert await cache.get("neg_ttl") is None
 
 
 @pytest.mark.asyncio
-async def test_cache_delete_and_clear():
-    cache = TTLCache()
-    cache.set("a", 1, ttl=60)
-    cache.set("b", 2, ttl=60)
-    assert cache.size() == 2
+async def test_cache_delete_and_clear(fake_redis):
+    cache = TTLCache(prefix="test")
+    await cache.set("a", 1, ttl=60)
+    await cache.set("b", 2, ttl=60)
+    assert await cache.size() == 2
 
-    cache.delete("a")
-    assert cache.get("a") is None
-    assert cache.get("b") == 2
-    assert cache.size() == 1
+    await cache.delete("a")
+    assert await cache.get("a") is None
+    assert await cache.get("b") == 2
+    assert await cache.size() == 1
 
-    cache.clear()
-    assert cache.get("b") is None
-    assert cache.size() == 0
+    await cache.clear_async()
+    assert await cache.get("b") is None
+    assert await cache.size() == 0
 
 
 @pytest.mark.asyncio
-async def test_single_flight_coalescing():
+async def test_single_flight_coalescing(fake_redis):
     cache = TTLCache()
     call_count = 0
 

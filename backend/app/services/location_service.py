@@ -625,7 +625,7 @@ async def geocode_location(place_name: str) -> tuple[float, float, str]:
     place_name = place_name.strip()[:_MAX_QUERY_LENGTH]
     cache_key = geocode_key(place_name)
 
-    cached = location_cache.get(cache_key)
+    cached = await location_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -660,7 +660,7 @@ async def geocode_location(place_name: str) -> tuple[float, float, str]:
     logger.info("Nominatim resolved '%s' → lat=%.4f, lon=%.4f", place_name, lat, lon)
 
     result = (lat, lon, display_name)
-    location_cache.set(cache_key, result, settings.location_cache_ttl)
+    await location_cache.set(cache_key, result, settings.location_cache_ttl)
     return result
 
 
@@ -671,7 +671,7 @@ async def reverse_geocode(latitude: float, longitude: float) -> str:
     Falls back gracefully on failure.
     """
     cache_key = reverse_geocode_key(latitude, longitude)
-    cached = location_cache.get(cache_key)
+    cached = await location_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -702,7 +702,7 @@ async def reverse_geocode(latitude: float, longitude: float) -> str:
             or data.get("name")
         )
         if name:
-            location_cache.set(cache_key, name, settings.location_cache_ttl)
+            await location_cache.set(cache_key, name, settings.location_cache_ttl)
             return name
     except Exception as exc:  # noqa: BLE001
         logger.warning("Nominatim reverse geocoding failed (%s); using coordinate fallback", exc)
@@ -721,7 +721,7 @@ async def search_locations(query: str, limit: int = 5) -> List[LocationSearchRes
         return []
 
     cache_key = location_search_key(cleaned, limit)
-    cached = location_cache.get(cache_key)
+    cached = await location_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -763,7 +763,7 @@ async def search_locations(query: str, limit: int = 5) -> List[LocationSearchRes
         except (KeyError, ValueError):
             continue
 
-    location_cache.set(cache_key, results, settings.location_cache_ttl)
+    await location_cache.set(cache_key, results, settings.location_cache_ttl)
     return results
 
 

@@ -60,21 +60,23 @@ class Settings(BaseSettings):
     llm_timeout: int = 30
     geo_timeout: int = 5
 
-    # ── Rate Limiting (in-memory, per-process) ──────────────────────────────
+    # ── Redis Cloud ─────────────────────────────────────────────────────────
+    redis_url: str = ""
+
+    # ── Rate Limiting (Redis-backed, per-user) ──────────────────────────────
     # Format: "<count>/<period>" — e.g. "120/minute", "100/hour"
-    # NOTE: in-memory limits are per-process; suitable for single-instance SIH deployment.
-    # For horizontal scaling, migrate to Redis-backed limits.
     rate_limit_chat: str = "120/minute"
     rate_limit_location: str = "120/minute"
     rate_limit_alerts: str = "120/minute"
 
     # ── Cache TTLs (seconds) ────────────────────────────────────────────────
-    # In-memory TTL cache; lost on server restart (acceptable for SIH demo).
     weather_cache_ttl: int = 300      # 5 minutes
     forecast_cache_ttl: int = 600     # 10 minutes
     hourly_cache_ttl: int = 300       # 5 minutes
     climate_cache_ttl: int = 3600     # 1 hour (climate data changes infrequently)
     location_cache_ttl: int = 3600    # 1 hour
+    recent_locations_ttl: int = 86400 * 30  # 30 days
+    recent_locations_max: int = 10
 
     # ── Resilience ──────────────────────────────────────────────────────────
     retry_max_attempts: int = 3

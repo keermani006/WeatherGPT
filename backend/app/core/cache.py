@@ -1,159 +1,176 @@
 """
 app/core/cache.py
 
-In-memory TTL cache with single-flight (request coalescing) to prevent
-cache stampedes on simultaneous identical requests.
-
-Design:
-  - Zero external dependencies (uses stdlib time and asyncio only).
-  - Coordinates are rounded to 2 decimal places before key generation to
-    prevent excessive cache fragmentation (~1.1 km precision).
-  - Each entry stores (value, expiry_monotonic).
-  - get() returns None on miss or expired entry.
-  - Single-flight: if two coroutines request the same key simultaneously
-    while the cache is empty, the second waits for the first to populate it.
-
-Limitations:
-  - In-memory only; lost on server restart.
-  - Per-process only; not suitable for horizontally-scaled deployments.
-    Migrate to Redis-backed cache for multi-instance production.
-
-NEVER cache:
-  - Authentication tokens
-  - Private user data (alerts are user-specific)
+Redis Cloud-backed TTL cache.
+Replaces in-memory storage with centralized Redis Cloud,
+ensuring consistent cache state across all horizontally scaled backend workers/instances.
+No global authoritative Python dictionary remains.
 """
 
 import asyncio
 import logging
-import time
-from typing import Any, Dict, Optional, Tuple
+import pickle
+from typing import Any, Callable, Optional
+
+from app.core.redis import get_redis_client
 
 logger = logging.getLogger(__name__)
 
 
 class TTLCache:
-    """Thread-safe (asyncio) in-memory TTL key-value cache."""
+    """Redis Cloud-backed TTL key-value cache."""
 
-    def __init__(self) -> None:
-        # {key: (value, expires_at_monotonic)}
-        self._store: Dict[str, Tuple[Any, float]] = {}
-        self._stale: Dict[str, Any] = {}
-        # Single-flight: pending futures keyed by cache key
-        self._inflight: Dict[str, asyncio.Event] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, prefix: str = "cache") -> None:
+        self.prefix = prefix
+        self._inflight: dict[str, asyncio.Future] = {}
 
-    def _is_alive(self, key: str) -> bool:
-        """Return True if the key exists and has not expired."""
-        entry = self._store.get(key)
-        if entry is None:
-            return False
-        _, expires_at = entry
-        return time.monotonic() < expires_at
+    def _key(self, key: str) -> str:
+        if self.prefix and not key.startswith(f"{self.prefix}:"):
+            return f"{self.prefix}:{key}"
+        return key
 
-    def get(self, key: str) -> Optional[Any]:
-        """Return cached value or None on miss/expiry."""
-        entry = self._store.get(key)
-        if entry is None:
-            logger.debug("Cache MISS: %s", key)
+    def _stale_key(self, key: str) -> str:
+        k = self._key(key)
+        return f"stale:{k}"
+
+    async def size(self) -> int:
+        """Count active non-stale keys for this cache prefix in Redis."""
+        redis = get_redis_client()
+        if redis is None:
+            return 0
+        try:
+            pattern = f"{self.prefix}:*" if self.prefix else "*"
+            keys = await redis.keys(pattern)
+            return len([k for k in keys if not k.startswith("stale:")])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Redis cache size error: %s", exc)
+            return 0
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Fetch cached item from Redis. Returns None on miss, expiry, or Redis outage."""
+        redis = get_redis_client()
+        if redis is None:
             return None
-        value, expires_at = entry
-        if time.monotonic() >= expires_at:
-            # Lazy eviction
-            self._store.pop(key, None)
-            logger.debug("Cache EXPIRED: %s", key)
+        try:
+            val = await redis.get(self._key(key))
+            if val is None:
+                return None
+            raw = val.encode("latin1") if isinstance(val, str) else val
+            return pickle.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Redis cache get error for key %s: %s", key, exc)
             return None
-        logger.debug("Cache HIT: %s", key)
-        return value
 
-    def set(self, key: str, value: Any, ttl: int) -> None:
-        """Store a value with a TTL in seconds and keep stale copy."""
+    async def set(self, key: str, value: Any, ttl: int) -> None:
+        """Store value in Redis Cloud with TTL and keep a stale copy for fallback."""
         if ttl <= 0:
             return
-        self._store[key] = (value, time.monotonic() + ttl)
-        self._stale[key] = value
-        logger.debug("Cache SET: %s (ttl=%ds)", key, ttl)
+        redis = get_redis_client()
+        if redis is None:
+            return
+        try:
+            pickled = pickle.dumps(value).decode("latin1")
+            r_key = self._key(key)
+            stale_key = self._stale_key(key)
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.setex(r_key, ttl, pickled)
+                # Keep stale copy for 7 days (stale-if-error fallback)
+                pipe.setex(stale_key, 86400 * 7, pickled)
+                await pipe.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Redis cache set error for key %s: %s", key, exc)
 
-    def get_stale(self, key: str) -> Optional[Any]:
-        """Return cached value even if expired (stale-if-error fallback)."""
-        return self._stale.get(key)
+    async def get_stale(self, key: str) -> Optional[Any]:
+        """Return stale cached value from Redis if upstream API fails."""
+        redis = get_redis_client()
+        if redis is None:
+            return None
+        try:
+            val = await redis.get(self._stale_key(key))
+            if val is None:
+                return None
+            raw = val.encode("latin1") if isinstance(val, str) else val
+            return pickle.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Redis cache get_stale error for key %s: %s", key, exc)
+            return None
 
-    def delete(self, key: str) -> None:
-        """Remove a specific cache entry."""
-        self._store.pop(key, None)
-        self._stale.pop(key, None)
+    async def delete(self, key: str) -> None:
+        """Remove entry from Redis."""
+        redis = get_redis_client()
+        if redis is None:
+            return
+        try:
+            await redis.delete(self._key(key), self._stale_key(key))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Redis cache delete error: %s", exc)
+
+    async def clear_async(self) -> None:
+        """Async clear entries for this cache prefix from Redis."""
+        redis = get_redis_client()
+        if redis is None:
+            return
+        try:
+            pattern = f"{self.prefix}:*"
+            stale_pattern = f"stale:{self.prefix}:*"
+            keys = await redis.keys(pattern)
+            stale_keys = await redis.keys(stale_pattern)
+            all_keys = keys + stale_keys
+            if all_keys:
+                await redis.delete(*all_keys)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Redis cache clear error: %s", exc)
 
     def clear(self) -> None:
-        """Evict all entries (useful in tests)."""
-        self._store.clear()
-        self._stale.clear()
-        self._inflight.clear()
-
-    def size(self) -> int:
-        """Return number of alive cache entries."""
-        now = time.monotonic()
-        return sum(1 for _, (_, exp) in self._store.items() if now < exp)
-
-    async def get_or_set(self, key: str, fetch_fn, ttl: int) -> Any:
-        """
-        Single-flight cache get-or-set.
-
-        If the key is cached, return immediately.
-        If another coroutine is already fetching the same key, wait for it.
-        Otherwise, execute fetch_fn(), cache the result, and notify waiters.
-        If fetch_fn() fails, falls back to stale cache if available.
-        """
-        # Fast path: already cached
-        value = self.get(key)
-        if value is not None:
-            return value
-
-        async with self._lock:
-            # Double-check after acquiring lock
-            value = self.get(key)
-            if value is not None:
-                return value
-
-            # Another coroutine is already fetching this key
-            if key in self._inflight:
-                event = self._inflight[key]
-                self._lock.release()
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    logger.warning("Cache single-flight timeout for key: %s", key)
-                finally:
-                    try:
-                        await self._lock.acquire()
-                    except Exception:  # noqa: BLE001
-                        pass
-                return self.get(key)  # May still be None if upstream failed
-
-            # We are the first — set up the event and release the lock
-            event = asyncio.Event()
-            self._inflight[key] = event
-
-        # Fetch outside the lock to allow other coroutines to proceed
+        """Clear cache entries. Supports sync calling in pytest fixtures."""
+        redis = get_redis_client()
+        if redis is None:
+            return
         try:
-            value = await fetch_fn()
-            self.set(key, value, ttl)
-            return value
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.clear_async())
+        except RuntimeError:
+            asyncio.run(self.clear_async())
+
+    async def get_or_set(self, key: str, fetch_fn: Callable, ttl: int) -> Any:
+        """
+        Fetch from Redis; on cache miss, execute fetch_fn(), store in Redis, and return.
+        Falls back to stale cached value on upstream exception.
+        Coalesces concurrent requests for the same key.
+        """
+        val = await self.get(key)
+        if val is not None:
+            return val
+
+        if key in self._inflight:
+            return await self._inflight[key]
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._inflight[key] = fut
+
+        try:
+            result = await fetch_fn()
+            await self.set(key, result, ttl)
+            fut.set_result(result)
+            return result
         except Exception as exc:
-            stale = self.get_stale(key)
+            stale = await self.get_stale(key)
             if stale is not None:
-                logger.warning("Upstream fetch failed for '%s' (%s); serving STALE cached data", key, exc)
+                logger.warning("Upstream fetch failed for '%s' (%s); serving STALE cached data from Redis", key, exc)
+                fut.set_result(stale)
                 return stale
+            fut.set_exception(exc)
             raise
         finally:
-            async with self._lock:
-                self._inflight.pop(key, None)
-            event.set()
+            self._inflight.pop(key, None)
 
 
-# ── Module-level singleton instances per data domain ──────────────────────────
+# ── Domain-specific singleton instances backed by Redis Cloud ─────────────────
 
-weather_cache = TTLCache()
-location_cache = TTLCache()
-climate_cache = TTLCache()
+weather_cache = TTLCache(prefix="weather")
+location_cache = TTLCache(prefix="loc")
+climate_cache = TTLCache(prefix="climate")
 
 
 # ── Key builders ──────────────────────────────────────────────────────────────
@@ -169,7 +186,6 @@ def bundle_weather_key(lat: float, lon: float) -> str:
 
 def current_weather_key(lat: float, lon: float) -> str:
     return f"weather:current:{_coords(lat, lon)}"
-
 
 
 def forecast_key(lat: float, lon: float, days: int) -> str:
@@ -189,8 +205,9 @@ def location_search_key(query: str, limit: int) -> str:
 
 
 def geocode_key(place: str) -> str:
-    return f"geocode:{place.lower().strip()}"
+    return f"location:geocode:{place.lower().strip()}"
 
 
 def reverse_geocode_key(lat: float, lon: float) -> str:
-    return f"revgeo:{_coords(lat, lon)}"
+    return f"location:revgeo:{_coords(lat, lon)}"
+

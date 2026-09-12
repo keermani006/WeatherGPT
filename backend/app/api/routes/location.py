@@ -9,9 +9,10 @@ Phase 2: rate limiting, query length validation, and circuit breaker errors.
 
 import logging
 import httpx
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, status, Request
+from typing import Annotated, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 
+from app.core.auth import AuthUser, get_current_user
 from app.core.limiter import limiter
 from app.core.resilience import ServiceUnavailableError
 from app.core.config import get_settings
@@ -69,6 +70,21 @@ async def search_locations_endpoint(
 
     try:
         results = await search_locations(search_term, limit=limit)
+        # Record to recent locations if request is from an authenticated user
+        from app.core.auth import get_optional_current_user
+        auth_user = get_optional_current_user(request)
+        if auth_user:
+            top_lat = results[0].latitude if results else None
+            top_lon = results[0].longitude if results else None
+            top_country = results[0].country if results else None
+            from app.services.recent_locations_service import add_recent_location
+            await add_recent_location(
+                user_id=auth_user.id,
+                location_name=search_term,
+                latitude=top_lat,
+                longitude=top_lon,
+                country=top_country,
+            )
         return LocationSearchResponse(results=results)
     except ServiceUnavailableError as exc:
         logger.error("Nominatim circuit breaker open: %s", exc)
@@ -82,3 +98,35 @@ async def search_locations_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": {"code": "GEOCODING_SERVICE_UNAVAILABLE", "message": "Geocoding service unavailable."}},
         ) from exc
+
+
+@router.get(
+    "/recent",
+    summary="Get recent locations for authenticated user",
+    description="Retrieve the authenticated user's recent search locations from Redis Cloud.",
+)
+@limiter.limit(settings.rate_limit_location)
+async def get_user_recent_locations(
+    request: Request,
+    current_user: Annotated[AuthUser, Depends(get_current_user)],
+):
+    from app.services.recent_locations_service import get_recent_locations
+    locations = await get_recent_locations(current_user.id)
+    return {"recent_locations": locations}
+
+
+@router.delete(
+    "/recent",
+    summary="Clear recent locations for authenticated user",
+    description="Clear the authenticated user's recent locations list in Redis Cloud.",
+)
+@limiter.limit(settings.rate_limit_location)
+async def clear_user_recent_locations(
+    request: Request,
+    current_user: Annotated[AuthUser, Depends(get_current_user)],
+):
+    from app.services.recent_locations_service import clear_recent_locations
+    await clear_recent_locations(current_user.id)
+    return {"message": "Recent locations cleared successfully."}
+
+

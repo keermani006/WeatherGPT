@@ -260,7 +260,7 @@ async def _fetch_consolidated_weather_bundle(latitude: float, longitude: float) 
                     "Open-Meteo HTTP 429 (Rate Limited) for (%.4f, %.4f). Checking fallback.",
                     latitude, longitude,
                 )
-                stale = weather_cache.get_stale(cache_key)
+                stale = await weather_cache.get_stale(cache_key)
                 if stale:
                     logger.info("Serving STALE cached weather bundle for (%.4f, %.4f)", latitude, longitude)
                     return stale
@@ -270,11 +270,11 @@ async def _fetch_consolidated_weather_bundle(latitude: float, longitude: float) 
                 )
                 fallback_data = _generate_fallback_weather_bundle(latitude, longitude)
                 # Cache fallback with shorter TTL (30s) so live data is retried promptly
-                weather_cache.set(cache_key, fallback_data, 30)
+                await weather_cache.set(cache_key, fallback_data, 30)
                 return fallback_data
             raise
         except Exception as exc:
-            stale = weather_cache.get_stale(cache_key)
+            stale = await weather_cache.get_stale(cache_key)
             if stale:
                 logger.warning("Upstream error (%s); serving STALE cached weather bundle", exc)
                 return stale

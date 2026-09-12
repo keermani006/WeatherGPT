@@ -10,7 +10,8 @@ supabase>=2.7.0
 # Authentication
 PyJWT>=2.9.0
 
-# Rate limiting (in-memory, no Redis required)
+# Redis Cloud (Centralized Rate Limiting & Caching)
+redis>=5.0.0
 slowapi>=0.1.9
 
 # Testing

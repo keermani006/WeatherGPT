@@ -91,7 +91,7 @@ async def get_climate_data(
     selected_end = end_date or DEFAULT_END_DATE
 
     cache_key = climate_key(latitude, longitude, selected_start, selected_end, selected_model)
-    cached = climate_cache.get(cache_key)
+    cached = await climate_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -159,5 +159,5 @@ async def get_climate_data(
         trend=_calculate_trend(daily_points),
         data_source=ClimateDataSource(),
     )
-    climate_cache.set(cache_key, result, settings.climate_cache_ttl)
+    await climate_cache.set(cache_key, result, settings.climate_cache_ttl)
     return result
