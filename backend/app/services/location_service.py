@@ -14,7 +14,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, NamedTuple, Optional
 
 import httpx
 
@@ -80,9 +80,9 @@ _DISALLOWED_WORDS = {
     "code", "coding", "python", "java", "javascript", "script", "program", "programming",
     "joke", "jokes", "story", "stories", "essay", "homework", "assignment", "problem",
     "question", "questions", "answer", "answers",
-    # Qualifiers
+    # Qualifiers & conversational adverbs
     "safe", "safely", "okay", "ok", "good", "bad", "better", "best", "worse", "worst",
-    "please", "thanks", "thank",
+    "please", "thanks", "thank", "instead", "then", "also", "too", "either",
 }
 
 _STOP_WORDS = _DISALLOWED_WORDS
@@ -99,7 +99,7 @@ def clean_place_name(name: Optional[str]) -> Optional[str]:
     cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned, flags=re.IGNORECASE).strip()
     # Strip trailing temporal words or qualifiers
     cleaned = re.sub(
-        r"\s+(?:tonight|today|tomorrow|now|this\s+\w+|next\s+\w+|safe|safely|considering.*|at\s+.*|around\s+.*|in\s+the\s+.*|in\s+evening.*|in\s+morning.*|in\s+afternoon.*)$",
+        r"\s+(?:tonight|today|tomorrow|now|this\s+\w+|next\s+\w+|safe|safely|instead|then|also|too|either|first|please|considering.*|at\s+.*|around\s+.*|in\s+the\s+.*|in\s+evening.*|in\s+morning.*|in\s+afternoon.*)$",
         "",
         cleaned,
         flags=re.IGNORECASE,
@@ -556,7 +556,7 @@ def extract_locations_from_message(message: str | None) -> list[str]:
 
     # 2. Preposition patterns: in/at/for/around/near/about/of/to <Place> (Title Case first)
     prep_matches = re.finditer(
-        r"\b(?:in|at|for|around|near|about|of|to)\s+([A-Z][A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:today|tomorrow|tonight|now|this|next|how|will|what|where|why|and|or|is|are|with|considering|weather|forecast)|$)",
+        r"\b(?:in|at|for|around|near|about|of|to)\s+([A-Z][A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:today|tomorrow|tonight|now|this|next|how|will|what|where|why|and|or|is|are|with|instead|then|also|too|either|considering|weather|forecast)|$)",
         cleaned,
     )
     for m in prep_matches:
@@ -581,7 +581,7 @@ def extract_locations_from_message(message: str | None) -> list[str]:
 
     # 4. Fallback case-insensitive preposition (e.g. 'in mumbai', 'about delhi', 'to anantapur')
     eos_match = re.finditer(
-        r"\b(?:in|at|for|around|near|about|of|to)\s+([A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:today|tomorrow|tonight|now|this|next|how|will|what|where|why|and|or|is|are|with|considering|weather|forecast)|$)",
+        r"\b(?:in|at|for|around|near|about|of|to)\s+([A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:today|tomorrow|tonight|now|this|next|how|will|what|where|why|and|or|is|are|with|instead|then|also|too|either|considering|weather|forecast)|$)",
         cleaned,
         re.IGNORECASE,
     )
@@ -611,6 +611,195 @@ def extract_location_from_message(message: str | None) -> Optional[str]:
     """Extract primary place name from user message."""
     locs = extract_locations_from_message(message)
     return locs[0] if locs else None
+
+
+class StateAwareLocationResolution(NamedTuple):
+    primary_query: Optional[str]
+    destination_query: Optional[str]
+    state_updates: dict
+    is_travel: bool
+
+
+def extract_candidate_location_with_corrections(message: str | None) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract candidate place name while properly handling corrections and conversational phrasing:
+      - 'I meant Bangalore, not Hyderabad' -> ('Bangalore', 'Hyderabad')
+      - 'Not Hyderabad, Bangalore instead' -> ('Bangalore', 'Hyderabad')
+      - 'Actually, let's go to Bangalore instead' -> ('Bangalore', None)
+      - 'Check Delhi instead' -> ('Delhi', None)
+    Returns (candidate_place, negated_place).
+    """
+    if not message:
+        return None, None
+    msg = message.strip()
+
+    # 1. Direct correction or preference: 'I meant X, not Y' or 'switch to X' or 'go to X'
+    m1 = re.search(
+        r"\b(?:meant|mean|want|prefer|choose|switch\s+to|change\s+to|make\s+it|go\s+to|head\s+to|check|try|look\s+at)\s+"
+        r"([A-Z][A-Za-z\s,-]+?)(?=[.,;!?]|\s+(?:not\b|instead\b|rather\b)|$)",
+        msg,
+        re.IGNORECASE,
+    )
+    negated = None
+    m_not_part = re.search(r"\bnot\s+([A-Za-z\s,-]+?)(?=[.,;!?]|$)", msg, re.IGNORECASE)
+    if m_not_part:
+        negated = clean_place_name(m_not_part.group(1))
+
+    if m1:
+        cand = clean_place_name(m1.group(1))
+        if cand:
+            return cand, negated
+
+    # 2. 'Not Y, X instead' or 'Instead of Y, let's go to X'
+    m2 = re.search(
+        r"\b(?:not|instead\s+of)\s+([A-Za-z\s,-]+?)[,;]?\s*(?:i\s+meant\s+|go\s+to\s+|let\'?s\s+go\s+to\s+|make\s+it\s+|take\s+it\s+to\s+)?([A-Z][A-Za-z\s,-]+?)(?=[.,;!?]|\s+instead\b|$)",
+        msg,
+        re.IGNORECASE,
+    )
+    if m2:
+        neg = clean_place_name(m2.group(1))
+        cand = clean_place_name(m2.group(2))
+        if cand:
+            return cand, neg
+
+    # 3. Standard fallback extraction
+    loc = extract_location_from_message(msg)
+    return loc, negated
+
+
+def resolve_state_aware_locations(
+    message: str,
+    state: Optional[Any] = None,
+    explicit_location: Optional[str] = None,
+) -> StateAwareLocationResolution:
+    """
+    State-aware location resolution: uses current message + structured conversation state
+    to determine active locations without relying on regex as the final authority.
+    - Handles explicit destination changes and corrections ('I meant Bangalore, not Hyderabad').
+    - Handles natural phrasing ('Actually, let's go to Bangalore instead').
+    - Preserves origin in travel corridors when destination changes.
+    - Preserves updated destination across follow-up queries without falling back to older locations.
+    - In non-travel queries, latest explicit location always overrides previous active location.
+    """
+    route_orig, route_dest = extract_route_info(message)
+    travel_dest = route_dest or extract_travel_destination(message)
+    candidate, _ = extract_candidate_location_with_corrections(message)
+    if explicit_location:
+        candidate = explicit_location
+
+    # Case 1: Explicit full route in message ("from X to Y")
+    if route_orig and (route_dest or travel_dest):
+        d = route_dest or travel_dest
+        return StateAwareLocationResolution(
+            primary_query=route_orig,
+            destination_query=d,
+            state_updates={
+                "origin": route_orig,
+                "destination": d,
+                "active_location": route_orig,
+                "activity": "travel",
+            },
+            is_travel=True,
+        )
+
+    # Case 1b: Destination specified with travel/movement verb without named origin (e.g. "drive to Pune", "take crops to Chennai")
+    if travel_dest and not route_orig and not (state and getattr(state, "activity", None) == "travel"):
+        return StateAwareLocationResolution(
+            primary_query=explicit_location or None,
+            destination_query=travel_dest,
+            state_updates={
+                "destination": travel_dest,
+                "activity": "travel",
+            },
+            is_travel=True,
+        )
+
+    # Case 2: Active travel state
+    is_active_travel = bool(
+        state
+        and getattr(state, "activity", None) == "travel"
+        and (getattr(state, "origin", None) or getattr(state, "destination", None))
+    )
+    if is_active_travel:
+        state_orig = getattr(state, "origin", None)
+        state_dest = getattr(state, "destination", None)
+
+        # Check if user intentionally abandoned travel for a standalone single-city query
+        is_standalone_weather = bool(
+            re.search(r"\b(?:weather|temperature|forecast|conditions)\s+(?:in|at|for)\b", message, re.IGNORECASE)
+            or "forget the trip" in message.lower()
+        )
+        if is_standalone_weather and candidate:
+            return StateAwareLocationResolution(
+                primary_query=candidate,
+                destination_query=None,
+                state_updates={
+                    "active_location": candidate,
+                    "origin": None,
+                    "destination": None,
+                    "activity": None,
+                },
+                is_travel=False,
+            )
+
+        # User specified a new origin ("from Pune")
+        if route_orig:
+            d = travel_dest or state_dest
+            return StateAwareLocationResolution(
+                primary_query=route_orig,
+                destination_query=d,
+                state_updates={
+                    "origin": route_orig,
+                    "destination": d,
+                    "active_location": route_orig,
+                    "activity": "travel",
+                },
+                is_travel=True,
+            )
+
+        # User changed/corrected the destination (e.g. "What about Bangalore instead?", "I meant Bangalore, not Hyderabad")
+        if candidate and candidate.lower() != (state_orig or "").lower():
+            return StateAwareLocationResolution(
+                primary_query=state_orig or candidate,
+                destination_query=candidate,
+                state_updates={
+                    "origin": state_orig,
+                    "destination": candidate,
+                    "active_location": state_orig or candidate,
+                    "activity": "travel",
+                },
+                is_travel=True,
+            )
+
+        # Follow-up without location (e.g. "What about tomorrow evening?")
+        return StateAwareLocationResolution(
+            primary_query=state_orig,
+            destination_query=state_dest,
+            state_updates={},
+            is_travel=True,
+        )
+
+    # Case 3: Non-travel query or initial turn with explicit location candidate
+    if candidate:
+        return StateAwareLocationResolution(
+            primary_query=candidate,
+            destination_query=None,
+            state_updates={
+                "active_location": candidate,
+                "origin": None,
+                "destination": None,
+                "activity": None,
+            },
+            is_travel=False,
+        )
+
+    # Follow-up continuing previous active location
+    return StateAwareLocationResolution(
+        primary_query=getattr(state, "active_location", None) if state else None,
+        destination_query=None,
+        state_updates={},
+        is_travel=False,
+    )
 
 
 

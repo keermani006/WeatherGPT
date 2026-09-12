@@ -32,10 +32,11 @@ def get_redis_client() -> Optional[aioredis.Redis]:
         return None
 
     try:
-        # Create connection pool with sensible timeouts
+        # Create connection pool with sensible timeouts and capped pool size
         _redis_client = aioredis.from_url(
             url,
             decode_responses=True,
+            max_connections=10,
             socket_connect_timeout=3.0,
             socket_timeout=3.0,
             retry_on_timeout=True,

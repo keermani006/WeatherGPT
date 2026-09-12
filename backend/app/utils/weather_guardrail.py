@@ -87,6 +87,7 @@ _STRONG_WEATHER: list[str] = [
     "umbrella", "raincoat",
     "outdoor event", "outdoor activity",
     "drive to", "driving to", "travel to", "travelling to", "traveling to", "trip to", "road trip",
+    "trip from", "travel from", "driving from", "drive from", "route from", "journey from", "going from", "heading from",
     "safe to travel", "safe to drive", "safe to visit", "safe to go",
 ]
 
@@ -147,6 +148,10 @@ def is_weather_related(message: str) -> bool:
     lower = message.lower()
 
     if _strong_match(lower):
+        return True
+
+    # Travel corridor queries: e.g. "trip from Chennai to Hyderabad", "from Delhi to Agra"
+    if re.search(r"\b(?:trip|travel|drive|route|journey)\s+from\s+[A-Za-z\s,-]+\s+to\s+[A-Za-z\s,-]+", lower) or re.search(r"\bfrom\s+[A-Za-z\s,-]+\s+to\s+[A-Za-z\s,-]+", lower):
         return True
 
     # Two or more weak signals → accept (e.g. "Is tomorrow cold?" has 2 signals)

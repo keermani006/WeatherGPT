@@ -110,8 +110,8 @@ def merge_conversation_state(
 
 async def _redis_get_str(key: str) -> Optional[str]:
     try:
-        from app.core.redis import get_redis
-        r = await get_redis()
+        from app.core.redis import get_redis_client
+        r = get_redis_client()
         if r is None:
             return None
         val = await r.get(key)
@@ -123,8 +123,8 @@ async def _redis_get_str(key: str) -> Optional[str]:
 
 async def _redis_set_str(key: str, value: str, ttl: int) -> None:
     try:
-        from app.core.redis import get_redis
-        r = await get_redis()
+        from app.core.redis import get_redis_client
+        r = get_redis_client()
         if r is not None:
             await r.set(key, value, ex=ttl)
     except Exception as exc:
@@ -133,8 +133,8 @@ async def _redis_set_str(key: str, value: str, ttl: int) -> None:
 
 async def _redis_delete(key: str) -> None:
     try:
-        from app.core.redis import get_redis
-        r = await get_redis()
+        from app.core.redis import get_redis_client
+        r = get_redis_client()
         if r is not None:
             await r.delete(key)
     except Exception as exc:

@@ -509,3 +509,210 @@ async def test_multiple_simultaneous_users(mock_weather):
             assert d1["conversation_id"] != d2["conversation_id"]
             assert d1["conversation_state"]["active_location"] == "Delhi"
             assert d2["conversation_state"]["active_location"] == "Mumbai"
+
+
+@pytest.mark.asyncio
+async def test_trip_destination_change_bangalore_instead_and_followup(mock_weather):
+    """
+    Test switching destination in multi-turn travel conversation:
+    Turn 1: Trip from Chennai to Hyderabad -> origin=Chennai, destination=Hyderabad
+    Turn 2: 'What about Bangalore instead?' -> destination=Bangalore, origin=Chennai
+    Turn 3: 'What about tomorrow evening?' -> destination=Bangalore, origin=Chennai, date_time='Tomorrow Evening'
+    Verifies that Hyderabad is completely replaced and not used in subsequent turns.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place):
+            pl = place.lower()
+            if "chennai" in pl:
+                return 13.0827, 80.2707, "Chennai, Tamil Nadu, India"
+            elif "hyderabad" in pl:
+                return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+            elif "bangalore" in pl or "bengaluru" in pl:
+                return 12.9716, 77.5946, "Bangalore, Karnataka, India"
+            return 28.6139, 77.2090, "Delhi, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.services.location_service.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_route_waypoints", AsyncMock(return_value=[{"name": "Midpoint", "latitude": 15.0, "longitude": 79.0, "distance_km": 250.0}])), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Route weather evaluated."):
+
+            # Turn 1: Chennai to Hyderabad
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Trip from Chennai to Hyderabad"})
+            assert resp1.status_code == 200
+            data1 = resp1.json()
+            conv_id = data1["conversation_id"]
+            state1 = data1["conversation_state"]
+            assert "Chennai" in state1["origin"]
+            assert "Hyderabad" in state1["destination"]
+            assert state1["activity"] == "travel"
+            if data1["travel_card"]:
+                assert "Chennai" in data1["travel_card"]["origin"]
+                assert "Hyderabad" in data1["travel_card"]["destination"]
+
+            # Turn 2: 'What about Bangalore instead?'
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "What about Bangalore instead?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+            state2 = data2["conversation_state"]
+            assert "Chennai" in state2["origin"]
+            assert "Bangalore" in state2["destination"]
+            assert "Hyderabad" not in state2["destination"]
+            assert state2["activity"] == "travel"
+            if data2["travel_card"]:
+                assert "Chennai" in data2["travel_card"]["origin"]
+                assert "Bangalore" in data2["travel_card"]["destination"]
+                assert "Hyderabad" not in data2["travel_card"]["destination"]
+
+            # Turn 3: 'What about tomorrow evening?'
+            resp3 = await ac.post("/api/v1/chat", json={
+                "message": "What about tomorrow evening?",
+                "conversation_id": conv_id,
+            })
+            assert resp3.status_code == 200
+            data3 = resp3.json()
+            state3 = data3["conversation_state"]
+            assert "Chennai" in state3["origin"]
+            assert "Bangalore" in state3["destination"]
+            assert "Hyderabad" not in state3["destination"]
+            assert state3["activity"] == "travel"
+            assert "Evening" in state3["date_time"] or "tomorrow" in state3["date_time"].lower()
+            if data3["travel_card"]:
+                assert "Chennai" in data3["travel_card"]["origin"]
+                assert "Bangalore" in data3["travel_card"]["destination"]
+
+
+@pytest.mark.asyncio
+async def test_trip_destination_correction_i_meant_bangalore_not_hyderabad(mock_weather):
+    """
+    Test destination correction: 'I meant Bangalore, not Hyderabad'.
+    Updates destination to Bangalore and clears previous destination.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place):
+            pl = place.lower()
+            if "chennai" in pl:
+                return 13.0827, 80.2707, "Chennai, Tamil Nadu, India"
+            elif "hyderabad" in pl:
+                return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+            elif "bangalore" in pl or "bengaluru" in pl:
+                return 12.9716, 77.5946, "Bangalore, Karnataka, India"
+            return 28.6139, 77.2090, "Delhi, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.services.location_service.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_route_waypoints", AsyncMock(return_value=[{"name": "Midpoint", "latitude": 15.0, "longitude": 79.0, "distance_km": 250.0}])), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Corrected destination to Bangalore."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Trip from Chennai to Hyderabad"})
+            assert resp1.status_code == 200
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "I meant Bangalore, not Hyderabad",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+            state2 = data2["conversation_state"]
+            assert "Chennai" in state2["origin"]
+            assert "Bangalore" in state2["destination"]
+            assert "Hyderabad" not in state2["destination"]
+
+
+@pytest.mark.asyncio
+async def test_trip_destination_natural_phrasing_actually_lets_go_to_bangalore_instead(mock_weather):
+    """
+    Test natural phrasing: 'Actually, let's go to Bangalore instead'.
+    Updates destination cleanly.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place):
+            pl = place.lower()
+            if "chennai" in pl:
+                return 13.0827, 80.2707, "Chennai, Tamil Nadu, India"
+            elif "hyderabad" in pl:
+                return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+            elif "bangalore" in pl or "bengaluru" in pl:
+                return 12.9716, 77.5946, "Bangalore, Karnataka, India"
+            return 28.6139, 77.2090, "Delhi, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.services.location_service.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_route_waypoints", AsyncMock(return_value=[{"name": "Midpoint", "latitude": 15.0, "longitude": 79.0, "distance_km": 250.0}])), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Switched to Bangalore."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Trip from Chennai to Hyderabad"})
+            assert resp1.status_code == 200
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "Actually, let's go to Bangalore instead",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+            state2 = data2["conversation_state"]
+            assert "Chennai" in state2["origin"]
+            assert "Bangalore" in state2["destination"]
+
+
+@pytest.mark.asyncio
+async def test_non_travel_location_switching_across_multiple_turns(mock_weather):
+    """
+    Non-travel queries: latest explicit location always overrides the previous active location.
+    Turn 1: Weather in Mumbai -> active_location = Mumbai
+    Turn 2: What about Pune? -> active_location = Pune (overrides Mumbai)
+    Turn 3: Actually, let's check Delhi instead -> active_location = Delhi (overrides Pune)
+    Turn 4: What about tomorrow? -> active_location = Delhi
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place):
+            pl = place.lower()
+            if "mumbai" in pl:
+                return 19.0760, 72.8777, "Mumbai, Maharashtra, India"
+            elif "pune" in pl:
+                return 18.5204, 73.8567, "Pune, Maharashtra, India"
+            elif "delhi" in pl:
+                return 28.6139, 77.2090, "Delhi, India"
+            return 13.0827, 80.2707, "Chennai, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.services.location_service.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Weather details."):
+
+            # Turn 1: Mumbai
+            r1 = await ac.post("/api/v1/chat", json={"message": "Weather in Mumbai"})
+            assert r1.status_code == 200
+            conv_id = r1.json()["conversation_id"]
+            assert "Mumbai" in r1.json()["location"]
+            assert "Mumbai" in r1.json()["conversation_state"]["active_location"]
+
+            # Turn 2: What about Pune?
+            r2 = await ac.post("/api/v1/chat", json={"message": "What about Pune?", "conversation_id": conv_id})
+            assert r2.status_code == 200
+            assert "Pune" in r2.json()["location"]
+            assert "Pune" in r2.json()["conversation_state"]["active_location"]
+
+            # Turn 3: Actually, let's check Delhi instead
+            r3 = await ac.post("/api/v1/chat", json={"message": "Actually, let's check Delhi instead", "conversation_id": conv_id})
+            assert r3.status_code == 200
+            assert "Delhi" in r3.json()["location"]
+            assert "Delhi" in r3.json()["conversation_state"]["active_location"]
+
+            # Turn 4: What about tomorrow?
+            r4 = await ac.post("/api/v1/chat", json={"message": "What about tomorrow?", "conversation_id": conv_id})
+            assert r4.status_code == 200
+            assert "Delhi" in r4.json()["location"]
+            assert "Delhi" in r4.json()["conversation_state"]["active_location"]
+

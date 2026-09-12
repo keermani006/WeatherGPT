@@ -75,6 +75,7 @@ from app.services.location_service import (
     geocode_location,
     get_route_waypoints,
     resolve_location,
+    resolve_state_aware_locations,
 )
 from app.services.weather_service import get_weather
 from app.utils.weather_guardrail import _contains_injection_attempt, is_weather_related
@@ -278,37 +279,27 @@ async def chat(
             detail="I can only help with weather-related questions.",
         )
 
-    # ── 5. High-Confidence Deterministic Extraction & State Updates ──────────
-    # Regex is used strictly for unambiguous, deterministic extractions:
-    #   - explicit route info ("from X to Y" / "transport goods to Z")
-    #   - explicit place names ("in Chennai", "What about Pune?")
-    #   - standard dates/times ("tomorrow", "tonight", "this evening")
-    #   - explicit cargo names ("harvested rice", "cotton")
-    route_orig, route_dest = extract_route_info(body.message)
-    travel_dest_name = route_dest or extract_travel_destination(body.message)
-    msg_extracted_loc = extract_location_from_message(body.message)
-    explicit_place = body.location or msg_extracted_loc
+    # ── 5. State-Aware Location Resolution & Updates ─────────────────────────
+    # Uses current message + structured conversation state to determine active locations
+    # without relying on regex as the sole authority for active location determination.
+    has_prior_location = bool(
+        conversation_state.active_location
+        or conversation_state.origin
+        or conversation_state.activity == "travel"
+    )
+
+    loc_res = resolve_state_aware_locations(
+        message=body.message,
+        state=conversation_state,
+        explicit_location=body.location,
+    )
+
     cargo = detect_cargo(body.message)
     departure_timing = detect_departure_timing(body.message)
     for_tomorrow = _is_tomorrow_question(body.message)
     is_tonight = _is_tonight_question(body.message)
 
-    # Merge updates into existing StructuredConversationState (Merge Semantics)
-    # Unrelated state is preserved; recent explicit user information overrides older fields.
-    state_updates = {}
-    if route_orig:
-        state_updates["origin"] = route_orig
-        state_updates["active_location"] = route_orig
-        state_updates["activity"] = "travel"
-    if travel_dest_name:
-        state_updates["destination"] = travel_dest_name
-        state_updates["activity"] = "travel"
-    elif explicit_place and not route_orig:
-        # User explicitly asked about a place e.g. "What about Chennai?"
-        state_updates["active_location"] = explicit_place
-        if conversation_state.activity == "travel" and conversation_state.destination:
-            state_updates["destination"] = explicit_place
-
+    state_updates = dict(loc_res.state_updates)
     if cargo:
         state_updates["cargo"] = cargo
     if departure_timing:
@@ -338,36 +329,45 @@ async def chat(
 
     # ── 6. Resolve Primary & Secondary Locations for Weather Data ────────────
     # Step 6.1: Resolve Primary Location
-    has_explicit_msg_loc = bool(
-        msg_extracted_loc
-        or route_orig
-        or (route_dest and not (body.latitude is not None and body.longitude is not None))
-    )
+    resolved: Optional[ResolvedLocation] = None
 
-    query_lat = body.latitude
-    query_lon = body.longitude
-    # If the user is continuing an active conversation and did not specify a location,
-    # don't allow ambient browser GPS to hijack the conversation's active location.
-    if conversation_state.active_location and not has_explicit_msg_loc and not body.location:
-        query_lat = None
-        query_lon = None
+    # In travel mode or follow-ups with an established prior context, resolve state primary_query
+    if loc_res.primary_query and has_prior_location:
+        try:
+            resolved = await resolve_location(
+                explicit=loc_res.primary_query,
+                message=None,
+                latitude=body.latitude if (loc_res.primary_query == body.location) else None,
+                longitude=body.longitude if (loc_res.primary_query == body.location) else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            logger.warning("Could not resolve state primary location '%s': %s", loc_res.primary_query, exc)
 
-    try:
-        resolved = await resolve_location(
-            explicit=body.location,
-            message=body.message,
-            latitude=query_lat,
-            longitude=query_lon,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        )
+    # Standalone initial query or direct query resolution
+    if not resolved:
+        try:
+            resolved = await resolve_location(
+                explicit=body.location,
+                message=body.message,
+                latitude=body.latitude,
+                longitude=body.longitude,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            logger.warning("Fallback location resolution failed: %s", exc)
 
-    # If message had no location, fall back to structured conversation state or history
-    if not resolved and (conversation_state.active_location or conversation_state.origin):
-        state_loc = conversation_state.active_location or conversation_state.origin
+    # State location fallback if no location in message
+    if not resolved and (loc_res.primary_query or conversation_state.active_location or conversation_state.origin):
+        state_loc = loc_res.primary_query or conversation_state.active_location or conversation_state.origin
         try:
             lat, lon, dname = await geocode_location(state_loc)
             resolved = ResolvedLocation(name=dname, latitude=lat, longitude=lon, source="state")
@@ -398,14 +398,16 @@ async def chat(
         )
 
     # Update conversation state with resolved primary location
-    conversation_state.active_location = resolved.name
-    if route_orig and not conversation_state.origin:
+    if not loc_res.is_travel:
+        conversation_state.active_location = resolved.name
+    elif not conversation_state.origin:
         conversation_state.origin = resolved.name
+        conversation_state.active_location = resolved.name
 
     # Step 6.2: Resolve Destination if travel scenario
     destination_resolved: Optional[ResolvedLocation] = None
     destination_query = (
-        travel_dest_name
+        loc_res.destination_query
         or (conversation_state.destination if conversation_state.activity == "travel" else None)
     )
     if destination_query and resolved.name.lower() not in destination_query.lower():

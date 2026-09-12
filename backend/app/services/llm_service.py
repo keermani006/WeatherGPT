@@ -71,8 +71,9 @@ STRICT RULES:
 1. Base all numerical weather assessments on the provided JSON blocks (current weather, 7-day forecast, tonight conditions, and route corridor waypoints). Do not fabricate numbers.
 2. Provide concise, clear, and highly actionable advice (typically 3-6 sentences).
 3. For dangerous weather (storms, flash floods, dense fog), prioritize user and cargo safety.
-4. You have access to conversation history and [CURRENT CONVERSATION STATE] — use them to naturally resolve ambiguous follow-ups, pronoun references ('there', 'it', 'the crop'), and temporal shifts ('what about tomorrow', 'when should I go', 'what about evening', 'is that better').
-5. If the user introduces or changes their travel destination, cargo, or activity, adapt seamlessly. You may optionally append a compact internal state tag at the very end of your response: <!--STATE: {"activity": "...", "cargo": "...", "date_time": "..."} -->.
+5. If the user introduces, changes, or corrects their travel destination, origin, active location, cargo, or activity (e.g. 'What about Bangalore instead?', 'I meant Bangalore, not Hyderabad', 'Actually, let\'s go to Bangalore instead', 'What about Pune?'):
+   - Explicitly confirm and use the updated location in your explanation.
+   - You may optionally append a compact internal state tag at the very end of your response: <!--STATE: {"destination": "...", "origin": "...", "activity": "...", "cargo": "...", "date_time": "..."} -->.
 """
 
 _ALERT_DETECTION_PROMPT = """\
