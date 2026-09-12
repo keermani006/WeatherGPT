@@ -86,14 +86,14 @@ export default function RegisterPage() {
   };
 
   return (
-    <main className="flex-1 overflow-y-auto w-full max-w-md mx-auto px-6 py-12 flex flex-col justify-center">
-      <div className="border border-hairline bg-paper/60 p-8 shadow-sm">
+    <main className="flex-1 overflow-y-auto w-full max-w-md mx-auto px-4 sm:px-6 py-8 sm:py-12 flex flex-col justify-center">
+      <div className="border border-hairline bg-paper/60 p-6 sm:p-8 shadow-sm">
         {/* Header */}
         <div className="mb-6">
           <span className="font-mono text-xs uppercase tracking-widest text-teal font-semibold">
             Join WeatherGPT
           </span>
-          <h1 className="font-sans text-2xl font-bold text-ink mt-1">Create an Account</h1>
+          <h1 className="font-sans text-xl sm:text-2xl font-bold text-ink mt-1">Create an Account</h1>
           <p className="font-sans text-xs text-ink/60 mt-1">
             Real-time threshold alerts, persistent search history, and AI insights.
           </p>
@@ -119,7 +119,7 @@ export default function RegisterPage() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Jane Doe"
-              className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar focus:outline-none transition-colors"
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
             />
           </div>
 
@@ -135,7 +135,7 @@ export default function RegisterPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="jane@example.com"
               required
-              className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar focus:outline-none transition-colors"
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
             />
           </div>
 
@@ -147,7 +147,7 @@ export default function RegisterPage() {
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="font-sans text-xs text-ink/40 hover:text-ink transition-colors"
+                className="font-sans text-xs text-ink/40 hover:text-ink transition-colors cursor-pointer"
               >
                 {showPassword ? "Hide" : "Show"}
               </button>
@@ -160,7 +160,7 @@ export default function RegisterPage() {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
               required
-              className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar focus:outline-none transition-colors"
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
             />
           </div>
 
@@ -176,7 +176,7 @@ export default function RegisterPage() {
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="••••••••"
               required
-              className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar focus:outline-none transition-colors"
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-sans text-ink placeholder:text-ink/30 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
             />
           </div>
 

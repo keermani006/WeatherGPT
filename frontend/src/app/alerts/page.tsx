@@ -130,8 +130,8 @@ export default function AlertsPage() {
   const selectedUnit = CONDITIONS.find((c) => c.value === condition)?.unit ?? "";
 
   return (
-    <main className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto px-6 py-8">
-      <div className="flex items-center justify-between">
+    <main className="flex-1 overflow-y-auto w-full max-w-2xl md:max-w-3xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
           <h1 className="font-sans text-2xl font-semibold text-ink">Alerts</h1>
           <p className="font-sans text-sm text-ink/50 mt-1">
@@ -189,14 +189,13 @@ export default function AlertsPage() {
       <section>
         <h2 className="font-sans text-sm text-ink/50 mb-3">New alert</h2>
 
-
-        <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
           {/* Condition dropdown */}
-          <div className="flex-1 min-w-[200px]">
+          <div className="w-full sm:flex-1">
             <select
               value={condition}
               onChange={(e) => setCondition(e.target.value)}
-              className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink focus:border-isobar focus:outline-none transition-colors"
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-2 text-sm font-sans text-ink focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
             >
               {CONDITIONS.map((c) => (
                 <option key={c.value} value={c.value}>
@@ -207,7 +206,7 @@ export default function AlertsPage() {
           </div>
 
           {/* Threshold input */}
-          <div className="w-32">
+          <div className="w-full sm:w-36">
             <div className="flex items-baseline gap-1">
               <input
                 type="number"
@@ -215,7 +214,7 @@ export default function AlertsPage() {
                 onChange={(e) => setThreshold(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleCreate()}
                 placeholder="Value"
-                className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-mono text-ink placeholder:text-ink/40 focus:border-isobar focus:outline-none transition-colors"
+                className="w-full bg-transparent border-0 border-b border-hairline px-1 py-2 text-base sm:text-sm font-mono text-ink placeholder:text-ink/40 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
               />
               <span className="font-mono text-xs text-ink/40">{selectedUnit}</span>
             </div>
@@ -226,7 +225,7 @@ export default function AlertsPage() {
             type="button"
             onClick={handleCreate}
             disabled={createMutation.isPending}
-            className="px-4 py-2 text-sm font-sans text-paper bg-isobar disabled:bg-ink/20 transition-colors"
+            className="w-full sm:w-auto px-4 py-2 text-sm font-sans font-medium text-paper bg-isobar hover:bg-isobar/90 disabled:bg-ink/20 transition-colors cursor-pointer rounded-xs"
           >
             {createMutation.isPending ? "Creating…" : "Create"}
           </button>

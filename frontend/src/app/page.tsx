@@ -13,7 +13,7 @@ import { ForecastList } from "@/components/forecast-list";
 
 export default function Dashboard() {
   return (
-    <main className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto px-6 py-8">
+    <main className="flex-1 overflow-y-auto w-full max-w-2xl md:max-w-3xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
       {/* Location bar */}
       <LocationBar />
 

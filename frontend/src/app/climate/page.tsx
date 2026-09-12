@@ -84,7 +84,7 @@ export default function ClimatePage() {
       : apiError?.message ?? (error ? "An unexpected error occurred." : null);
 
   return (
-    <main className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto px-6 py-8">
+    <main className="flex-1 overflow-y-auto w-full max-w-2xl md:max-w-3xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
       <h1 className="font-sans text-2xl font-semibold text-ink">Climate</h1>
       <p className="font-sans text-sm text-ink/50 mt-1">
         CMIP6 model projections{locationName && <span> for {locationName}</span>}
@@ -97,9 +97,9 @@ export default function ClimatePage() {
       <hr className="border-t border-hairline mt-4 mb-6" />
 
       {/* ── Controls ── */}
-      <section className="flex flex-wrap items-end gap-4">
+      <section className="flex flex-col sm:flex-row flex-wrap sm:items-end gap-3 sm:gap-4">
         {/* Start date */}
-        <div>
+        <div className="w-full sm:w-auto">
           <label className="block font-sans text-xs text-ink/50 mb-1">
             Start date
           </label>
@@ -107,12 +107,12 @@ export default function ClimatePage() {
             type="date"
             value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
-            className="bg-transparent border-b border-hairline px-1 py-2 text-sm font-mono text-ink focus:border-isobar focus:outline-none transition-colors"
+            className="w-full sm:w-auto bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-mono text-ink focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
           />
         </div>
 
         {/* End date */}
-        <div>
+        <div className="w-full sm:w-auto">
           <label className="block font-sans text-xs text-ink/50 mb-1">
             End date
           </label>
@@ -120,19 +120,19 @@ export default function ClimatePage() {
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
-            className="bg-transparent border-b border-hairline px-1 py-2 text-sm font-mono text-ink focus:border-isobar focus:outline-none transition-colors"
+            className="w-full sm:w-auto bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-mono text-ink focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
           />
         </div>
 
         {/* Model selector */}
-        <div>
+        <div className="w-full sm:w-auto">
           <label className="block font-sans text-xs text-ink/50 mb-1">
             Model
           </label>
           <select
             value={model}
             onChange={(e) => setModel(e.target.value as ClimateModel)}
-            className="bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink focus:border-isobar focus:outline-none transition-colors"
+            className="w-full sm:w-auto bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-sm font-sans text-ink focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
           >
             {MODELS.map((m) => (
               <option key={m.value} value={m.value}>

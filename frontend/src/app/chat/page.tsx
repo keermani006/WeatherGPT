@@ -339,35 +339,35 @@ export default function ChatPage() {
   const isEmpty = messages.length === 0;
 
   return (
-    <main className="flex flex-1 flex-col w-full max-w-2xl mx-auto min-h-0">
+    <main className="flex flex-1 flex-col w-full max-w-2xl md:max-w-3xl mx-auto min-h-0">
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 min-h-0">
+      <div className="flex-1 overflow-y-auto px-3.5 sm:px-6 py-4 sm:py-6 min-h-0">
         {isEmpty ? (
           /* Empty state */
-          <div className="flex flex-col items-center justify-center h-full gap-6">
+          <div className="flex flex-col items-center justify-center h-full gap-5 sm:gap-6 px-2">
             <div className="text-center">
-              <h1 className="font-mono text-3xl font-semibold text-isobar">WeatherGPT</h1>
-              <p className="font-sans text-sm text-ink/40 mt-2">
+              <h1 className="font-mono text-2xl sm:text-3xl font-semibold text-isobar">WeatherGPT</h1>
+              <p className="font-sans text-xs sm:text-sm text-ink/50 mt-1.5 sm:mt-2">
                 Ask about weather, travel safety, or set alerts
               </p>
               {locationName && (
-                <p className="font-sans text-xs text-ink/30 mt-1 flex items-center justify-center gap-1">
+                <p className="font-sans text-xs text-ink/40 mt-1 flex items-center justify-center gap-1">
                   <PinIcon className="w-3 h-3 text-ink/30" />
-                  {locationName}
+                  <span>{locationName}</span>
                 </p>
               )}
             </div>
 
-            <hr className="w-32 border-t border-hairline" />
+            <hr className="w-24 sm:w-32 border-t border-hairline" />
 
-            <div className="flex flex-wrap justify-center gap-2 max-w-md">
+            <div className="flex flex-wrap justify-center gap-1.5 sm:gap-2 max-w-md">
               {SUGGESTIONS.map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
                   onClick={() => doSend(suggestion)}
                   disabled={sending}
-                  className="px-3 py-1.5 text-xs font-sans text-isobar border border-hairline hover:border-isobar/40 hover:bg-isobar/5 transition-colors disabled:opacity-50"
+                  className="px-2.5 sm:px-3 py-1.5 text-xs font-sans text-isobar border border-hairline hover:border-isobar/40 hover:bg-isobar/5 transition-colors disabled:opacity-50 rounded-sm cursor-pointer"
                 >
                   {suggestion}
                 </button>
@@ -376,13 +376,13 @@ export default function ChatPage() {
           </div>
         ) : (
           /* Message thread */
-          <div className="space-y-5">
+          <div className="space-y-4 sm:space-y-5">
             {/* Clear chat button */}
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={clearChat}
-                className="font-sans text-[11px] text-ink/30 hover:text-ochre transition-colors"
+                className="font-sans text-[11px] text-ink/30 hover:text-ochre transition-colors cursor-pointer"
               >
                 Clear chat
               </button>
@@ -393,8 +393,8 @@ export default function ChatPage() {
                 {/* User message */}
                 {msg.role === "user" && (
                   <div className="flex justify-end">
-                    <div className="max-w-[80%] px-4 py-2.5 bg-isobar/10 border border-hairline">
-                      <p className="font-sans text-sm text-ink leading-relaxed">{msg.content}</p>
+                    <div className="max-w-[88%] sm:max-w-[80%] px-3.5 sm:px-4 py-2 sm:py-2.5 bg-isobar/10 border border-hairline rounded-sm">
+                      <p className="font-sans text-sm text-ink leading-relaxed break-words">{msg.content}</p>
                     </div>
                   </div>
                 )}
@@ -402,8 +402,8 @@ export default function ChatPage() {
                 {/* Assistant message */}
                 {msg.role === "assistant" && (
                   <div className="flex justify-start">
-                    <div className="max-w-[90%] space-y-3">
-                      <p className="font-sans text-sm text-ink leading-relaxed">{msg.content}</p>
+                    <div className="w-full sm:max-w-[92%] space-y-3">
+                      <p className="font-sans text-sm text-ink leading-relaxed break-words">{msg.content}</p>
 
                       {/* Primary weather widget (only if not a route travel query) */}
                       {!msg.travel_card && msg.weather_data && <WeatherWidget data={msg.weather_data} />}
@@ -439,51 +439,41 @@ export default function ChatPage() {
 
                       {/* Alert suggestion / active card */}
                       {msg.alert_suggestion && (
-                        <div className={`border px-4 py-3 space-y-2 transition-colors ${
-                          alertCreated.has(i)
-                            ? "border-teal/60 bg-teal/10"
-                            : "border-teal/30 bg-teal/5"
-                        }`}>
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <span className="font-mono text-[10px] uppercase tracking-widest text-teal font-semibold flex items-center gap-1.5">
-                                {alertCreated.has(i) ? "✓ Alert Active" : "Set Alert"}
+                        <div className="border border-hairline bg-paper/60 p-3 sm:p-3.5 space-y-2 mt-2">
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-[10px] uppercase tracking-widest text-ochre font-semibold">
+                              Suggested Alert
+                            </span>
+                            {alertCreated.has(i) && (
+                              <span className="font-mono text-[10px] text-teal font-medium">
+                                Active ✓
                               </span>
-                              <p className="font-sans text-xs text-ink/80 mt-0.5 font-medium">
-                                {msg.alert_suggestion.description}
-                              </p>
-                            </div>
+                            )}
+                          </div>
+
+                          <p className="font-sans text-xs text-ink/70">
+                            {msg.alert_suggestion.description}
+                          </p>
+
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="font-mono text-[11px] text-ink/40">
+                              {msg.alert_suggestion.location_name} · {CONDITION_LABELS[msg.alert_suggestion.condition] || msg.alert_suggestion.condition} {msg.alert_suggestion.threshold}{CONDITION_UNITS[msg.alert_suggestion.condition] || ""}
+                            </span>
+
                             {alertCreated.has(i) ? (
-                              <Link
-                                href="/alerts"
-                                className="shrink-0 px-3 py-1.5 text-xs font-sans font-medium bg-teal/20 text-teal hover:bg-teal/30 transition-colors flex items-center gap-1"
-                              >
-                                View Alerts →
-                              </Link>
+                              <span className="text-[11px] font-sans text-teal">
+                                Alert set
+                              </span>
                             ) : (
                               <button
                                 type="button"
                                 onClick={() => handleCreateAlert(msg.alert_suggestion!, i)}
                                 disabled={alertCreating === String(i)}
-                                className="shrink-0 px-3 py-1.5 text-xs font-sans font-medium bg-teal text-paper hover:bg-teal/90 disabled:bg-ink/20 transition-colors flex items-center gap-1.5"
+                                className="px-3 py-1 text-xs font-sans text-paper bg-isobar hover:bg-isobar/90 disabled:opacity-50 transition-colors cursor-pointer rounded-xs"
                               >
-                                {alertCreating === String(i) ? (
-                                  <>
-                                    <span className="w-3 h-3 border-2 border-paper/30 border-t-paper rounded-full animate-spin" />
-                                    <span>Creating…</span>
-                                  </>
-                                ) : (
-                                  "🔔 Create Alert"
-                                )}
+                                {alertCreating === String(i) ? "Setting alert…" : "Set alert"}
                               </button>
                             )}
-                          </div>
-                          <div className="flex items-center gap-3 text-[11px] font-mono text-ink/50">
-                            <span>{CONDITION_LABELS[msg.alert_suggestion.condition] || msg.alert_suggestion.condition}</span>
-                            <span>·</span>
-                            <span>Threshold: {msg.alert_suggestion.threshold}{CONDITION_UNITS[msg.alert_suggestion.condition] || ""}</span>
-                            <span>·</span>
-                            <span>{msg.alert_suggestion.location_name}</span>
                           </div>
                         </div>
                       )}
@@ -493,22 +483,23 @@ export default function ChatPage() {
 
                 {/* System message */}
                 {msg.role === "system" && (
-                  <div className="flex justify-center py-1">
-                    <p className="font-sans text-xs text-ochre border border-ochre/20 px-3 py-1.5">
+                  <div className="text-center my-2">
+                    <span className="font-sans text-xs text-ink/60 bg-paper/80 border border-hairline px-3 py-1 inline-block">
                       {msg.content}
-                    </p>
+                    </span>
                   </div>
                 )}
               </div>
             ))}
 
-            {/* Typing indicator */}
+            {/* Sending indicator */}
             {sending && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-1 py-2">
-                  <span className="w-1.5 h-1.5 bg-isobar/40 rounded-full animate-pulse" />
-                  <span className="w-1.5 h-1.5 bg-isobar/40 rounded-full animate-pulse [animation-delay:150ms]" />
-                  <span className="w-1.5 h-1.5 bg-isobar/40 rounded-full animate-pulse [animation-delay:300ms]" />
+                <div className="flex items-center gap-1 px-3 py-2 text-ink/30 font-mono text-xs">
+                  <span>Thinking</span>
+                  <span className="animate-pulse">.</span>
+                  <span className="animate-pulse delay-100">.</span>
+                  <span className="animate-pulse delay-200">.</span>
                 </div>
               </div>
             )}
@@ -519,27 +510,27 @@ export default function ChatPage() {
       </div>
 
       {/* Input area */}
-      <div className="border-t border-hairline px-6 py-3 shrink-0">
+      <div className="border-t border-hairline px-3.5 sm:px-6 py-2.5 sm:py-3.5 bg-paper shrink-0">
         <div className="flex items-center justify-between text-xs font-sans text-ink/50 mb-2">
-          <div className="flex items-center gap-1.5">
-            <PinIcon className="w-3 h-3 text-isobar" />
+          <div className="flex items-center gap-1.5 truncate max-w-[70%] sm:max-w-none">
+            <PinIcon className="w-3 h-3 text-isobar shrink-0" />
             {locationName ? (
-              <span>Location: <strong className="text-ink font-medium">{locationName}</strong></span>
+              <span className="truncate">Location: <strong className="text-ink font-medium">{locationName}</strong></span>
             ) : (
-              <span>Location: <span className="italic">Not set (auto-detect or mention a city)</span></span>
+              <span className="italic truncate">Location not set (auto-detect or mention a city)</span>
             )}
           </div>
           <button
             type="button"
             onClick={detectLocation}
             disabled={detectingLoc}
-            className="text-[11px] text-isobar hover:underline flex items-center gap-1 disabled:opacity-50"
+            className="text-[11px] text-isobar hover:underline flex items-center gap-1 disabled:opacity-50 shrink-0 cursor-pointer"
           >
-            {detectingLoc ? "Detecting GPS…" : locationName ? "↻ Re-detect GPS" : "📍 Detect GPS"}
+            {detectingLoc ? "Detecting…" : locationName ? "↻ Re-detect GPS" : "📍 Detect GPS"}
           </button>
         </div>
 
-        <div className="flex items-end gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 bg-paper border border-hairline rounded-lg px-2.5 sm:px-3 py-1.5 focus-within:border-isobar transition-colors">
           <textarea
             ref={inputRef}
             value={input}
@@ -551,13 +542,13 @@ export default function ChatPage() {
                 : "Ask about weather in any city (e.g. London)…"
             }
             rows={1}
-            className="flex-1 resize-none bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/40 focus:border-isobar focus:outline-none transition-colors"
+            className="flex-1 resize-none bg-transparent border-0 outline-none ring-0 shadow-none focus:outline-none focus:ring-0 focus:border-0 px-1 py-1 text-base sm:text-sm font-sans text-ink placeholder:text-ink/40 transition-colors"
           />
           <button
             type="button"
             onClick={() => doSend(input)}
             disabled={!input.trim() || sending}
-            className="shrink-0 px-4 py-2 text-sm font-sans text-paper bg-isobar disabled:bg-ink/20 transition-colors"
+            className="shrink-0 px-3.5 sm:px-4 py-1.5 text-xs sm:text-sm font-sans font-medium text-paper bg-isobar disabled:bg-ink/20 rounded transition-colors cursor-pointer"
           >
             Send
           </button>

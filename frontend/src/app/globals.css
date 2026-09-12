@@ -30,9 +30,29 @@ body {
   border-color: var(--color-hairline);
 }
 
-/* ── Keyboard focus styles ── */
-/* Ensure every interactive element has a visible focus ring */
-:focus-visible {
+/* ── Remove browser default & focus-visible border/outline around input boxes ── */
+input,
+textarea,
+select {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+  -webkit-appearance: none;
+}
+
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+}
+
+/* ── Keyboard focus styles for non-input interactive elements ── */
+:focus-visible:not(input):not(textarea):not(select) {
   outline: 2px solid var(--color-isobar);
   outline-offset: 2px;
 }

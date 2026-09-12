@@ -44,23 +44,23 @@ export function ForecastList() {
           return (
             <li
               key={day.date}
-              className={`flex items-center justify-between py-3 ${
+              className={`flex items-center justify-between py-2.5 sm:py-3 ${
                 i > 0 ? "border-t border-hairline" : ""
               }`}
             >
-              <span className="font-sans text-sm text-ink w-24 shrink-0">
+              <span className="font-sans text-xs sm:text-sm text-ink font-medium w-20 sm:w-24 shrink-0">
                 {dayName}
               </span>
 
-              <span className="font-sans text-sm text-ink/60 flex-1 text-center">
+              <span className="font-sans text-xs sm:text-sm text-ink/60 flex-1 text-center truncate px-2">
                 {day.condition}
               </span>
 
-              <span className="font-mono text-sm text-ink shrink-0 w-20 text-right">
+              <span className="font-mono text-xs sm:text-sm text-ink shrink-0 w-16 sm:w-20 text-right">
                 {day.temperature_max.toFixed(0)}° / {day.temperature_min.toFixed(0)}°
               </span>
 
-              <span className="font-mono text-sm text-teal shrink-0 w-12 text-right">
+              <span className="font-mono text-xs sm:text-sm text-teal shrink-0 w-10 sm:w-12 text-right">
                 {day.rain_probability}%
               </span>
             </li>

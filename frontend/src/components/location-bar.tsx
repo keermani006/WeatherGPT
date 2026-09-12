@@ -95,73 +95,84 @@ export function LocationBar() {
 
   return (
     <div ref={wrapperRef} className="relative w-full max-w-2xl mx-auto">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
         {/* Current location name */}
         {name && (
-          <span className="font-sans text-sm text-ink/70 shrink-0">
-            {name}
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="font-sans text-xs uppercase tracking-wider text-isobar font-semibold sm:hidden">
+              Location:
+            </span>
+            <span
+              className="font-sans text-sm text-ink/80 font-medium truncate max-w-[280px] sm:max-w-[220px]"
+              title={name}
+            >
+              {name}
+            </span>
+          </div>
         )}
 
-        {/* Search input */}
-        <div className="relative flex-1">
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setShowResults(true);
-            }}
-            onFocus={() => {
-              if (debouncedQuery.trim()) setShowResults(true);
-            }}
-            placeholder={name ? "Search another location" : "Search for a location or enable location access"}
-            className="w-full bg-transparent border-b border-hairline px-1 py-2 text-sm font-sans text-ink placeholder:text-ink/40 focus:border-isobar focus:outline-none transition-colors"
-          />
+        {/* Search input & Geolocation */}
+        <div className="flex items-center gap-2 flex-1">
+          <div className="relative flex-1">
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setShowResults(true);
+              }}
+              onFocus={() => {
+                if (debouncedQuery.trim()) setShowResults(true);
+              }}
+              placeholder={name ? "Search another location…" : "Search for a location or detect GPS…"}
+              className="w-full bg-transparent border-0 border-b border-hairline px-1 py-1.5 sm:py-2 text-base sm:text-sm font-sans text-ink placeholder:text-ink/40 focus:border-isobar outline-none ring-0 shadow-none focus:outline-none focus:ring-0 transition-colors"
+            />
 
-          {/* Loading indicator */}
-          {isLoading && (
-            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-ink/40">
-              …
-            </span>
-          )}
+            {/* Loading indicator */}
+            {isLoading && (
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-ink/40 font-mono">
+                …
+              </span>
+            )}
 
-          {/* Search results dropdown */}
-          {showResults && data?.results && data.results.length > 0 && (
-            <ul className="absolute top-full left-0 right-0 z-10 mt-1 bg-paper border border-hairline">
-              {data.results.map((result, i) => (
-                <li key={`${result.latitude}-${result.longitude}-${i}`}>
-                  <button
-                    type="button"
-                    onClick={() => selectLocation(result)}
-                    className="w-full text-left px-3 py-2 text-sm font-sans text-ink hover:bg-isobar/10 transition-colors border-b border-hairline last:border-b-0"
-                  >
-                    {result.name}
-                    {result.country && (
-                      <span className="text-ink/50">, {result.country}</span>
-                    )}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+            {/* Search results dropdown */}
+            {showResults && data?.results && data.results.length > 0 && (
+              <ul className="absolute top-full left-0 right-0 z-20 mt-1 bg-paper border border-hairline shadow-lg max-h-60 overflow-y-auto">
+                {data.results.map((result, i) => (
+                  <li key={`${result.latitude}-${result.longitude}-${i}`}>
+                    <button
+                      type="button"
+                      onClick={() => selectLocation(result)}
+                      className="w-full text-left px-3 py-2 text-sm font-sans text-ink hover:bg-isobar/10 transition-colors border-b border-hairline last:border-b-0"
+                    >
+                      <span className="font-medium">{result.name}</span>
+                      {result.country && (
+                        <span className="text-ink/50 text-xs">, {result.country}</span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* Geolocation button */}
+          <button
+            type="button"
+            onClick={doGeolocation}
+            disabled={geoLoading}
+            className="shrink-0 p-1.5 text-isobar hover:text-isobar/80 disabled:text-ink/30 transition-colors cursor-pointer"
+            title="Use current GPS location"
+            aria-label="Use current location"
+          >
+            {geoLoading ? (
+              <span className="text-xs font-sans">Locating…</span>
+            ) : (
+              <GpsIcon className="w-4 h-4" />
+            )}
+          </button>
         </div>
-
-        {/* Geolocation button */}
-        <button
-          type="button"
-          onClick={doGeolocation}
-          disabled={geoLoading}
-          className="shrink-0 text-sm font-sans text-isobar hover:text-isobar/80 disabled:text-ink/30 transition-colors"
-          aria-label="Use current location"
-        >
-          {geoLoading ? (
-            <span className="text-xs">Locating…</span>
-          ) : (
-            <GpsIcon className="w-4 h-4" />
-          )}
-        </button>
       </div>
 
       {/* Inline error for search */}
