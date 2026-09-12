@@ -94,6 +94,29 @@ Condition mapping:
 If NO alert intent, respond with ONLY: {"intent": false}
 """
 
+_SUMMARIZATION_PROMPT = """\
+You are a factual conversation summarizer for WeatherGPT.
+
+Given the prior conversation summary and a set of older conversation turns, produce a NEW concise factual summary.
+
+Capture ONLY:
+- Locations mentioned (origin, destination, city, route)
+- Travel or movement intent (e.g., transporting harvested rice from Hyderabad to Chennai)
+- Cargo / crop type (e.g., harvested rice, grain, vegetables, cotton)
+- Departure time or date constraints mentioned
+- Weather concerns or decisions (e.g., user is worried about rain, planning early departure)
+- Specific conditions or constraints (e.g., "user asked to avoid highways")
+- Any explicit user decisions or plan changes
+
+Do NOT include:
+- Generic assistant boilerplate or greetings
+- Repeated weather numbers that change each turn
+- Filler phrases or pleasantries
+- Fabricated context not present in the conversation
+
+Be concise (2-5 sentences max). Return only the updated summary text.
+"""
+
 
 def _weather_block(
     weather_data: WeatherData,
@@ -191,6 +214,52 @@ async def _detect_alert_intent(user_message: str) -> Optional[dict]:
     return None
 
 
+async def generate_conversation_summary(
+    existing_summary: str,
+    messages_to_summarize: List[HistoryMessage],
+) -> str:
+    """
+    Use Groq to produce a concise factual summary of older conversation turns.
+
+    Args:
+        existing_summary: The current/prior summary (may be empty for first summarization).
+        messages_to_summarize: The older HistoryMessage turns outside the sliding window.
+
+    Returns:
+        Updated summary string.
+
+    Raises:
+        Exception on Groq failure (caller should catch and preserve existing summary).
+    """
+    client = _get_groq_client()
+
+    # Build conversation transcript for summarization
+    transcript_parts = []
+    if existing_summary:
+        transcript_parts.append(f"[Prior summary]\n{existing_summary}")
+    transcript_parts.append("[Conversation turns to summarize]")
+    for m in messages_to_summarize:
+        label = "User" if m.role == "user" else "Assistant"
+        transcript_parts.append(f"{label}: {m.content}")
+
+    transcript = "\n\n".join(transcript_parts)
+
+    async with cb_groq:
+        completion = await client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": _SUMMARIZATION_PROMPT},
+                {"role": "user", "content": transcript},
+            ],
+            model=settings.groq_model,
+            temperature=0.1,
+            max_tokens=300,
+        )
+
+    summary = (completion.choices[0].message.content or "").strip()
+    logger.info("Conversation summary generated (%d chars)", len(summary))
+    return summary
+
+
 async def generate_weather_response(
     user_question: str,
     weather_data: WeatherData,
@@ -203,6 +272,7 @@ async def generate_weather_response(
     destination_tonight_summary: Optional[dict] = None,
     route_waypoints: Optional[List[RouteWaypoint]] = None,
     travel_card: Optional[TravelCardData] = None,
+    conversation_summary: Optional[str] = None,
 ) -> str:
     """
     Call Groq and return its answer as a plain string.
@@ -210,7 +280,7 @@ async def generate_weather_response(
     Args:
         user_question: The user's current message
         weather_data: Primary location weather data
-        history: Conversation history for context
+        history: Recent sliding-window conversation turns for context
         destination_weather: Destination weather for travel queries
         alert_suggestion: Structured alert suggestion if alert intent was detected
         forecast_summary: 7-day daily forecast summary for primary location
@@ -219,6 +289,7 @@ async def generate_weather_response(
         destination_tonight_summary: Tonight's weather/fog/rain summary for destination
         route_waypoints: Intermediate pass-by places with weather along transit corridor
         travel_card: Structured Travel Weather Card data
+        conversation_summary: Persistent conversation summary of older turns (hybrid memory)
     """
     max_len = settings.max_message_length
     if len(user_question) > max_len:
@@ -275,6 +346,18 @@ async def generate_weather_response(
         )
 
     user_content = f"{weather_context}{alert_note}{travel_card_note}\n\nUser question: {user_question}"
+
+    # Build hybrid memory context: summary + sliding window
+    # conversation_summary captures older context (outside sliding window)
+    # history carries the recent sliding window turns
+    memory_prefix = ""
+    if conversation_summary and conversation_summary.strip():
+        memory_prefix = (
+            f"[CONVERSATION BACKGROUND — facts from earlier in this session, use for context resolution]\n"
+            f"{conversation_summary.strip()}\n\n"
+        )
+    if memory_prefix:
+        user_content = f"{memory_prefix}{user_content}"
 
     client = _get_groq_client()
     history_messages = _build_history_messages(history)

@@ -52,6 +52,11 @@ class ChatRequest(BaseModel):
         max_length=20,
         description="Previous conversation turns (most recent last, up to 20 turns).",
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="Stable conversation ID for multi-turn context continuity. If None, a new conversation is created for authenticated users.",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -128,6 +133,36 @@ class TravelCardData(BaseModel):
 
 # ── Response ─────────────────────────────────────────────────────────────────
 
+# ── Conversation Models ───────────────────────────────────────────────────────
+
+class ConversationMessage(BaseModel):
+    """A single stored message in a conversation."""
+    id: str
+    conversation_id: str
+    role: str  # 'user' | 'assistant'
+    content: str
+    created_at: Optional[str] = None
+
+
+class ConversationSummary(BaseModel):
+    """Metadata for a conversation including its persistent summary."""
+    id: str
+    user_id: str
+    title: Optional[str] = None
+    summary: str = ""
+    summary_updated_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ConversationDetail(BaseModel):
+    """Full conversation detail: summary + recent messages."""
+    conversation: ConversationSummary
+    recent_messages: List[HistoryMessage] = Field(default_factory=list)
+
+
+# ── Response ─────────────────────────────────────────────────────────────────
+
 class ChatResponse(BaseModel):
     """Full response returned to the client."""
 
@@ -156,6 +191,10 @@ class ChatResponse(BaseModel):
     created_alert: Optional[dict] = Field(
         default=None,
         description="The alert that was automatically created if user is authenticated.",
+    )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Stable conversation ID for this multi-turn session.",
     )
 
     model_config = {

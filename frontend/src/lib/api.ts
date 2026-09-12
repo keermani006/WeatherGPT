@@ -208,6 +208,7 @@ export function sendChatMessage(params: {
   lng?: number;
   location_name?: string;
   history?: { role: string; content: string }[];
+  conversation_id?: string;
 }) {
   const isPlaceholder =
     !params.location_name ||
@@ -219,6 +220,7 @@ export function sendChatMessage(params: {
   return request<{
     answer: string;
     location: string;
+    conversation_id?: string;
     weather_data?: {
       location: string;
       temperature: number;
@@ -268,9 +270,11 @@ export function sendChatMessage(params: {
       longitude: params.lng ?? null,
       location: isPlaceholder ? null : params.location_name,
       history: params.history ?? [],
+      conversation_id: params.conversation_id ?? null,
     }),
   });
 }
+
 
 
 // ── 6. Location search ───────────────────────────────────────────────────────

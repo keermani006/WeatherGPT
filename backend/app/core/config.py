@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     recent_locations_ttl: int = 86400 * 30  # 30 days
     recent_locations_max: int = 10
 
+    # ── Conversational Memory ────────────────────────────────────────────────
+    recent_message_limit: int = 10          # sliding window size (messages)
+    summary_trigger_threshold: int = 12     # messages before rolling summary
+    max_context_tokens: int = 4000          # max token budget for context
+    conversation_cache_ttl: int = 3600      # Redis TTL for conversation cache (1 hour)
+
     # ── Resilience ──────────────────────────────────────────────────────────
     retry_max_attempts: int = 3
     retry_base_delay: float = 0.5    # seconds; doubles each attempt

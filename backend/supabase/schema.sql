@@ -77,3 +77,65 @@ CREATE POLICY "users_delete_own" ON alerts
 -- Run after migration to verify RLS and indexes:
 -- SELECT schemaname, tablename, rowsecurity FROM pg_tables WHERE tablename = 'alerts';
 -- SELECT indexname FROM pg_indexes WHERE tablename = 'alerts';
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PHASE 3: Conversational Memory
+-- Add conversations and messages tables for hybrid memory (sliding window + summary).
+-- Run after Phase 2 schema. Safe to run multiple times (idempotent via IF NOT EXISTS).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ── conversations ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS conversations (
+    id               text PRIMARY KEY,
+    user_id          uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    title            text,
+    summary          text DEFAULT '',
+    summary_updated_at timestamptz,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS conversations_user_id_idx      ON conversations (user_id);
+CREATE INDEX IF NOT EXISTS conversations_user_updated_idx  ON conversations (user_id, updated_at DESC);
+
+-- RLS
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "conv_select_own" ON conversations;
+DROP POLICY IF EXISTS "conv_insert_own" ON conversations;
+DROP POLICY IF EXISTS "conv_update_own" ON conversations;
+DROP POLICY IF EXISTS "conv_delete_own" ON conversations;
+
+CREATE POLICY "conv_select_own" ON conversations FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "conv_insert_own" ON conversations FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "conv_update_own" ON conversations FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "conv_delete_own" ON conversations FOR DELETE USING (auth.uid() = user_id);
+
+
+-- ── messages ──────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS messages (
+    id               text PRIMARY KEY,
+    conversation_id  text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id          uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    role             text NOT NULL CHECK (role IN ('user', 'assistant')),
+    content          text NOT NULL,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS messages_conversation_idx  ON messages (conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS messages_user_id_idx       ON messages (user_id);
+
+-- RLS
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "msg_select_own" ON messages;
+DROP POLICY IF EXISTS "msg_insert_own" ON messages;
+DROP POLICY IF EXISTS "msg_delete_own" ON messages;
+
+CREATE POLICY "msg_select_own" ON messages FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "msg_insert_own" ON messages FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "msg_delete_own" ON messages FOR DELETE USING (auth.uid() = user_id);
+

@@ -88,6 +88,7 @@ export default function ChatPage() {
   const [detectingLoc, setDetectingLoc] = useState(false);
   const [alertCreating, setAlertCreating] = useState<string | null>(null); // message index
   const [alertCreated, setAlertCreated] = useState<Set<number>>(new Set());
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const currentLoadedUserRef = useRef<string | null | undefined>(undefined);
@@ -125,6 +126,7 @@ export default function ChatPage() {
 
     setMessages([]);
     setAlertCreated(new Set());
+    setConversationId(null);  // Reset conversation when user changes
   }, [user?.id, isAuthLoading]);
 
   // ── Persist messages to localStorage for current active user ─────────────
@@ -184,6 +186,7 @@ export default function ChatPage() {
   function clearChat() {
     setMessages([]);
     setAlertCreated(new Set());
+    setConversationId(null);  // Start a fresh conversation server-side
     const storageKey = getChatStorageKey(user?.id);
     try {
       localStorage.removeItem(storageKey);
@@ -245,7 +248,13 @@ export default function ChatPage() {
         lng: lng ?? undefined,
         location_name: locationName ?? undefined,
         history,
+        conversation_id: conversationId ?? undefined,
       });
+
+      // Persist server-assigned conversation ID for continuity
+      if (response.conversation_id) {
+        setConversationId(response.conversation_id);
+      }
 
       if (
         response.location &&

@@ -2,23 +2,34 @@
 app/api/routes/chat.py
 
 POST /api/v1/chat
+GET  /api/v1/conversations
+GET  /api/v1/conversations/{conversation_id}
+DELETE /api/v1/conversations/{conversation_id}
 
-Request flow:
+Request flow (chat endpoint):
   1. Validate request.
   2. Friendly greeting fast-path.
   3. Guardrail check — reject non-weather messages with 403.
-  4. Detect travel intent → resolve BOTH origin + destination.
-  5. Resolve primary location (explicit → extracted → GPS).
-  6. Detect tomorrow question.
-  7. Fetch weather (origin + optional destination) from Open-Meteo.
-  8. Run alert intent detection in parallel with LLM answer generation.
-  9. Return structured ChatResponse with optional destination_weather + alert_suggestion.
+  4. If authenticated: resolve or create conversation, retrieve hybrid context
+     (persistent summary + recent sliding window).
+  5. Contextual Reference Resolution:
+     - If follow-up detected ("tomorrow", "there", location switch, cargo reference):
+       resolve from recent window → then summary.
+  6. Detect travel intent → resolve BOTH origin + destination.
+  7. Resolve primary location (explicit → extracted/resolved from context → GPS).
+  8. Detect tomorrow question.
+  9. Fetch weather (origin + optional destination) from Open-Meteo.
+ 10. Fetch route waypoints & travel weather card.
+ 11. Run alert intent detection + generate LLM response with hybrid context.
+ 12. Persist user + assistant messages; trigger rolling summarization if threshold exceeded.
+ 13. Return structured ChatResponse with conversation_id.
 """
 
 import asyncio
 import logging
+import re
 import time
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
@@ -30,6 +41,9 @@ from app.schemas.chat import (
     AlertSuggestion,
     ChatRequest,
     ChatResponse,
+    ConversationDetail,
+    ConversationSummary,
+    HistoryMessage,
     RouteWaypoint,
     TravelCardData,
     WeatherData,
@@ -65,6 +79,16 @@ _FORECAST_KEYWORDS = [
 ]
 _TONIGHT_KEYWORDS = ["tonight", "night", "overnight", "this evening", "late night", "fog"]
 
+# Reference indicators — follow-up patterns that signal context should be resolved
+_FOLLOW_UP_PATTERNS = [
+    r"\btomorrow\b", r"\bnext day\b",
+    r"\bthere\b", r"\bit\b", r"\bsame place\b",
+    r"\bwhat about\b", r"\bhow about\b",
+    r"\bthe crop\b", r"\bthe goods\b", r"\bthe cargo\b", r"\bthe rice\b",
+    r"\bthe weather\b", r"\bsame route\b", r"\bsame location\b",
+    r"\bwill it\b", r"\bwould it\b", r"\bis it\b",
+]
+
 
 def _is_tomorrow_question(message: str) -> bool:
     lower = message.lower()
@@ -79,6 +103,81 @@ def _is_forecast_question(message: str) -> bool:
 def _is_tonight_question(message: str) -> bool:
     lower = message.lower()
     return any(kw in lower for kw in _TONIGHT_KEYWORDS)
+
+
+def _is_follow_up(message: str) -> bool:
+    """Detect if message is a follow-up that needs conversational context."""
+    lower = message.lower()
+    return any(re.search(p, lower) for p in _FOLLOW_UP_PATTERNS)
+
+
+def _extract_location_override_from_followup(message: str) -> Optional[str]:
+    """
+    Extract explicit location from a follow-up message like:
+    'What about Chennai?' / 'How about Pune?'
+    Returns the location name, or None if not found.
+    """
+    patterns = [
+        r"\bwhat about\s+([A-Za-z\s,-]{2,30})\??$",
+        r"\bhow about\s+([A-Za-z\s,-]{2,30})\??$",
+        r"\band\s+([A-Za-z\s,-]{2,30})\??$",
+    ]
+    for pat in patterns:
+        m = re.search(pat, message.strip(), re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip().rstrip("?.,! ")
+            if len(candidate) >= 2 and candidate.lower() not in {
+                "tomorrow", "today", "tonight", "now", "there", "it",
+                "the weather", "the crop", "next day"
+            }:
+                return candidate
+    return None
+
+
+def _extract_context_location(
+    recent_messages: List[HistoryMessage],
+    summary: str,
+) -> Optional[str]:
+    """
+    Walk recent messages in reverse chronological order, then the summary,
+    to find the most recently mentioned location.
+    """
+    # Search recent messages (most recent first)
+    for msg in reversed(recent_messages):
+        loc = extract_location_from_message(msg.content)
+        if loc:
+            return loc
+    # Fall back to summary
+    if summary:
+        loc = extract_location_from_message(summary)
+        if loc:
+            return loc
+    return None
+
+
+def _extract_context_destination(
+    recent_messages: List[HistoryMessage],
+    summary: str,
+) -> Optional[str]:
+    """
+    Walk recent messages in reverse chronological order, then summary,
+    to find the most recently mentioned travel destination.
+    """
+    for msg in reversed(recent_messages):
+        _, dest = extract_route_info(msg.content)
+        if dest:
+            return dest
+        dest = extract_travel_destination(msg.content)
+        if dest:
+            return dest
+    if summary:
+        _, dest = extract_route_info(summary)
+        if dest:
+            return dest
+        dest = extract_travel_destination(summary)
+        if dest:
+            return dest
+    return None
 
 
 def _build_fallback_answer(
@@ -117,14 +216,18 @@ def _build_fallback_answer(
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main chat endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.post(
     "",
     response_model=ChatResponse,
     summary="Send a weather question",
     description=(
-        "Send a natural-language weather question (max 1000 characters). "
-        "Supports conversation history for multi-turn chat, travel queries "
-        "(e.g. 'Is it safe to travel to Delhi?'), and alert intent detection. "
+        "Send a natural-language weather question (max 2000 characters). "
+        "Supports conversation history, travel queries, alert intent detection, "
+        "and conversational memory (sliding window + persistent summary). "
         "Non-weather questions are rejected with 403."
     ),
     responses={
@@ -142,9 +245,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     """Handle a single user weather question end-to-end."""
     start = time.perf_counter()
     logger.info(
-        "Chat request | message='%s' | location='%s' | coords=(%s, %s) | history_turns=%d",
+        "Chat request | message='%s' | location='%s' | coords=(%s, %s) | conv_id='%s'",
         body.message[:80], body.location, body.latitude, body.longitude,
-        len(body.history) if body.history else 0,
+        body.conversation_id,
     )
 
     # ── 1. Friendly greetings fast-path ──────────────────────────────────────
@@ -166,8 +269,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         )
 
     # ── 2. Guardrail ─────────────────────────────────────────────────────────
-    # NOTE: The guardrail runs unconditionally. A location in the message does
-    # NOT bypass it — "What's the population of Delhi?" is not weather-related.
     if not is_weather_related(body.message):
         logger.info("Request rejected by guardrail | message='%s'", body.message[:80])
         raise HTTPException(
@@ -175,24 +276,98 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             detail="I can only help with weather-related questions.",
         )
 
-    from app.services.location_service import (
-        extract_location_from_message,
-        extract_locations_from_message,
-        extract_route_info,
-        extract_travel_destination,
-    )
+    # ── 3. Resolve authenticated user & conversation context ─────────────────
+    from app.core.auth import get_optional_current_user
+    auth_user = get_optional_current_user(request)
+
+    conversation_id: Optional[str] = None
+    conversation_summary: str = ""
+    # Start with history from request body (guest / client-side sliding window)
+    history_messages: List[HistoryMessage] = [
+        HistoryMessage(role=m.role, content=m.content)
+        for m in (body.history or [])
+    ]
+
+    if auth_user:
+        from app.services.conversation_service import (
+            get_or_create_conversation,
+            get_conversation_context,
+        )
+        conv = await get_or_create_conversation(
+            conversation_id=body.conversation_id,
+            user_id=auth_user.id,
+        )
+        conversation_id = conv.id
+        # Load server-side hybrid context (overrides client-sent history)
+        conversation_summary, history_messages = await get_conversation_context(
+            conversation_id=conversation_id,
+            user_id=auth_user.id,
+        )
+        logger.info(
+            "Conversation context loaded | conv_id='%s' | summary_len=%d | recent_msgs=%d",
+            conversation_id, len(conversation_summary), len(history_messages)
+        )
+
+    # ── 4. Contextual Reference Resolution ───────────────────────────────────
+    #
+    # If the current message appears to be a follow-up (contains "tomorrow", "there",
+    # "what about X?", "the crop", etc.), resolve the implied location/destination
+    # from the recent conversation context before standard extraction.
+    #
+    is_followup = _is_follow_up(body.message)
+    context_location: Optional[str] = None
+    context_destination: Optional[str] = None
+
+    if is_followup and (history_messages or conversation_summary):
+        # Check for explicit location switch in follow-up: "What about Chennai?"
+        location_override = _extract_location_override_from_followup(body.message)
+        if location_override:
+            # User is switching location/destination
+            context_location = location_override
+            logger.info("Follow-up location override detected: '%s'", location_override)
+        else:
+            # Resolve from recent window (priority) → summary
+            context_location = _extract_context_location(history_messages, conversation_summary)
+            context_destination = _extract_context_destination(history_messages, conversation_summary)
+            logger.info(
+                "Follow-up resolved from context: location='%s', destination='%s'",
+                context_location, context_destination
+            )
+
+    # ── 5. Travel intent detection ────────────────────────────────────────────
     route_orig, route_dest = extract_route_info(body.message)
     travel_dest_name = route_dest or extract_travel_destination(body.message)
     msg_locs = extract_locations_from_message(body.message)
 
-    # ── 3. Resolve primary location ──────────────────────────────────────────
+    # If no explicit travel destination in message but one was resolved from context
+    if not travel_dest_name and context_destination:
+        travel_dest_name = context_destination
+
+    # ── 6. Resolve primary location ──────────────────────────────────────────
     try:
+        # Use context_location to augment resolution if it's a follow-up
+        explicit_loc = body.location
+        if context_location and not explicit_loc:
+            explicit_loc = context_location
+
         resolved = await resolve_location(
-            explicit=body.location,
-            message=body.message,
+            explicit=explicit_loc,
+            message=body.message if not is_followup else None,
             latitude=body.latitude,
             longitude=body.longitude,
         )
+
+        # If resolution from message failed but we have a context location, try that
+        if not resolved and context_location:
+            try:
+                lat, lon, dname = await geocode_location(context_location)
+                from app.services.location_service import ResolvedLocation
+                resolved = ResolvedLocation(
+                    name=dname, latitude=lat, longitude=lon, source="context"
+                )
+            except Exception:
+                pass
+
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except httpx.TimeoutException as exc:
@@ -210,13 +385,12 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 "(e.g. 'What's the weather in Chennai?') or allow browser location access."
             ),
             location="Unknown",
+            conversation_id=conversation_id,
         )
 
     logger.info("Primary location resolved: '%s' (source=%s)", resolved.name, resolved.source)
 
     # Save to user recent locations if authenticated
-    from app.core.auth import get_optional_current_user
-    auth_user = get_optional_current_user(request)
     if auth_user and resolved and resolved.name:
         from app.services.recent_locations_service import add_recent_location
         await add_recent_location(
@@ -226,7 +400,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             longitude=resolved.longitude,
         )
 
-    # ── 4. Resolve secondary/destination location (if any) ───────────────────
+    # ── 7. Resolve secondary/destination location (if any) ───────────────────
     secondary_query = None
     if route_dest and route_dest.lower() not in resolved.name.lower() and resolved.name.lower() not in route_dest.lower():
         secondary_query = route_dest
@@ -252,7 +426,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not resolve secondary location '%s': %s", secondary_query, exc)
 
-    # ── 5. Fetch weather data ─────────────────────────────────────────────────
+    # ── 8. Fetch weather data ─────────────────────────────────────────────────
     for_tomorrow = _is_tomorrow_question(body.message)
     try:
         weather_data = await get_weather(
@@ -282,7 +456,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not fetch secondary weather: %s", exc)
 
-    # ── 5b. Fetch route waypoints & corridor weather for travel queries ────────
+    # ── 8b. Fetch route waypoints & corridor weather ──────────────────────────
     route_waypoints: Optional[List[RouteWaypoint]] = None
     if (
         destination_resolved
@@ -326,7 +500,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         except Exception as wp_err:  # noqa: BLE001
             logger.warning("Failed fetching route waypoints: %s", wp_err)
 
-    # ── 5c. Detect cargo, timing & compute Travel Weather Card ─────────────────
+    # ── 8c. Detect cargo, timing & compute Travel Weather Card ────────────────
     travel_card: Optional[TravelCardData] = None
     cargo = detect_cargo(body.message)
     departure_timing = detect_departure_timing(body.message)
@@ -343,17 +517,13 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 departure_timing=departure_timing,
             )
             logger.info(
-                "Travel Weather Card created | %s -> %s | Risk=%s | Cargo=%s | Timing=%s",
-                travel_card.origin,
-                travel_card.destination,
-                travel_card.overall_risk,
-                travel_card.cargo,
-                travel_card.departure_timing,
+                "Travel Weather Card created | %s -> %s | Risk=%s",
+                travel_card.origin, travel_card.destination, travel_card.overall_risk,
             )
         except Exception as tc_err:  # noqa: BLE001
             logger.warning("Failed to compute TravelCardData: %s", tc_err)
 
-    # ── 6. Fetch 7-day forecast and tonight condition details ────────────────
+    # ── 9. Fetch 7-day forecast and tonight conditions ────────────────────────
     from app.services.weather_service import get_forecast
 
     is_forecast = _is_forecast_question(body.message)
@@ -429,9 +599,10 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 "fog_risk": _fog_assessment(destination_weather.humidity, destination_weather.wind_speed),
             }
 
-    # ── 7. Build alert suggestion & generate LLM response ─────────────────────
+    # ── 10. Build alert suggestion & generate LLM response ────────────────────
     alert_suggestion = None
     created_alert = None
+    answer = ""
     try:
         raw_alert = await build_alert_suggestion(
             body.message,
@@ -453,7 +624,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         elif raw_alert:
             alert_suggestion = raw_alert
 
-        # If alert intent detected and request is authenticated, automatically create the alert
+        # Auto-create alert if authenticated
         if alert_suggestion:
             auth_header = request.headers.get("Authorization")
             if auth_header and auth_header.startswith("Bearer "):
@@ -478,10 +649,13 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 except Exception as auto_err:
                     logger.warning("Could not auto-create alert from chat: %s", auto_err)
 
+        # Build history list from HistoryMessage objects (for LLM)
+        llm_history = history_messages if history_messages else None
+
         answer = await generate_weather_response(
             user_question=body.message,
             weather_data=weather_data,
-            history=body.history,
+            history=llm_history,
             destination_weather=destination_weather,
             alert_suggestion=alert_suggestion,
             forecast_summary=forecast_summary,
@@ -490,6 +664,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             destination_tonight_summary=destination_tonight_summary,
             route_waypoints=route_waypoints,
             travel_card=travel_card,
+            conversation_summary=conversation_summary if conversation_summary else None,
         )
     except httpx.TimeoutException:
         logger.warning("LLM timed out; returning structured fallback for '%s'", resolved.name)
@@ -498,15 +673,37 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         logger.error("LLM/alert error: %s", exc)
         answer = _build_fallback_answer(weather_data, destination_weather)
 
+    # ── 11. Persist messages & trigger summarization ──────────────────────────
+    if auth_user and conversation_id and answer:
+        from app.services.conversation_service import (
+            add_message,
+            check_and_trigger_summarization,
+        )
+        try:
+            # Persist user message + assistant answer
+            await add_message(conversation_id, auth_user.id, "user", body.message)
+            await add_message(conversation_id, auth_user.id, "assistant", answer)
+
+            # Rolling summarization check (fail-safe — errors do not crash chat)
+            new_summary = await check_and_trigger_summarization(
+                conversation_id=conversation_id,
+                user_id=auth_user.id,
+                existing_summary=conversation_summary,
+                recent_messages=history_messages,
+            )
+            if new_summary:
+                logger.info("Conversation %s summary updated (%d chars)", conversation_id, len(new_summary))
+        except Exception as persist_err:  # noqa: BLE001
+            logger.error("Failed to persist conversation messages: %s", persist_err)
+
     elapsed = (time.perf_counter() - start) * 1000
     logger.info(
-        "Request completed in %.1f ms | location='%s' | travel=%s | waypoints=%d | alert=%s | created=%s",
+        "Request completed in %.1f ms | location='%s' | travel=%s | waypoints=%d | conv_id='%s'",
         elapsed,
         resolved.name,
         destination_resolved is not None,
         len(route_waypoints) if route_waypoints else 0,
-        alert_suggestion is not None,
-        created_alert is not None,
+        conversation_id,
     )
 
     return ChatResponse(
@@ -518,4 +715,97 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         travel_card=travel_card,
         alert_suggestion=alert_suggestion,
         created_alert=created_alert,
+        conversation_id=conversation_id,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation management endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/conversations",
+    summary="List user's conversations",
+    description="Returns all conversations for the authenticated user, ordered by most recently updated.",
+)
+async def list_conversations_endpoint(request: Request):
+    """List all conversations for the authenticated user."""
+    from app.core.auth import get_current_user
+    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    from fastapi import Depends
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        from app.core.auth import _decode_jwt, AuthUser
+        payload = _decode_jwt(token)
+        user_id = payload.get("sub", "")
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.") from exc
+
+    from app.services.conversation_service import list_conversations
+    conversations = await list_conversations(user_id)
+    return {"conversations": [c.model_dump() for c in conversations]}
+
+
+@router.get(
+    "/conversations/{conversation_id}",
+    summary="Get conversation details",
+    description="Returns the conversation summary and recent messages for the given conversation.",
+)
+async def get_conversation_endpoint(conversation_id: str, request: Request):
+    """Get a specific conversation (with recent messages) for the authenticated user."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        from app.core.auth import _decode_jwt
+        payload = _decode_jwt(token)
+        user_id = payload.get("sub", "")
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.") from exc
+
+    from app.services.conversation_service import _fetch_conversation, get_conversation_context
+    conv = await _fetch_conversation(conversation_id, user_id)
+    if not conv:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+
+    summary, recent = await get_conversation_context(conversation_id, user_id)
+    return ConversationDetail(
+        conversation=conv,
+        recent_messages=recent,
+    ).model_dump()
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    summary="Delete a conversation",
+    description="Deletes a conversation and all its messages for the authenticated user.",
+)
+async def delete_conversation_endpoint(conversation_id: str, request: Request):
+    """Delete a conversation for the authenticated user."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        from app.core.auth import _decode_jwt
+        payload = _decode_jwt(token)
+        user_id = payload.get("sub", "")
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token.")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.") from exc
+
+    from app.services.conversation_service import delete_conversation
+    deleted = await delete_conversation(conversation_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    return {"deleted": True, "conversation_id": conversation_id}
