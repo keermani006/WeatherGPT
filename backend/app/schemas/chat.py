@@ -155,10 +155,28 @@ class ConversationSummary(BaseModel):
     updated_at: Optional[str] = None
 
 
+class StructuredConversationState(BaseModel):
+    """
+    Lightweight structured conversation state maintained per user/conversation.
+    Enables instant contextual continuity without relying on regex keyword lists or extra LLM calls.
+    """
+    user_id: Optional[str] = Field(default=None, description="Owner user ID for strict isolation")
+    active_location: Optional[str] = Field(default=None, description="Current primary location")
+    origin: Optional[str] = Field(default=None, description="Starting point for travel/route")
+    destination: Optional[str] = Field(default=None, description="Destination for travel/route")
+    activity: Optional[str] = Field(default=None, description="Activity context: travel, farming, outdoor event, etc.")
+    cargo: Optional[str] = Field(default=None, description="Transported cargo or crop")
+    date_time: Optional[str] = Field(default=None, description="Temporal reference: now, tomorrow, evening, etc.")
+    current_weather_concern: Optional[str] = Field(default=None, description="Primary weather concern: rain, fog, heat, wind, etc.")
+    previous_recommendation: Optional[str] = Field(default=None, description="Summary of previous recommendation/risk")
+    updated_at: Optional[str] = Field(default=None, description="ISO timestamp of last update")
+
+
 class ConversationDetail(BaseModel):
-    """Full conversation detail: summary + recent messages."""
+    """Full conversation detail: summary + recent messages + structured state."""
     conversation: ConversationSummary
     recent_messages: List[HistoryMessage] = Field(default_factory=list)
+    state: Optional[StructuredConversationState] = None
 
 
 # ── Response ─────────────────────────────────────────────────────────────────
@@ -195,6 +213,10 @@ class ChatResponse(BaseModel):
     conversation_id: Optional[str] = Field(
         default=None,
         description="Stable conversation ID for this multi-turn session.",
+    )
+    conversation_state: Optional[StructuredConversationState] = Field(
+        default=None,
+        description="Current structured conversation state.",
     )
 
     model_config = {

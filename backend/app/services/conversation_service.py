@@ -16,11 +16,15 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import get_settings
 from app.core.database import get_supabase
-from app.schemas.chat import ConversationSummary, HistoryMessage
+from app.schemas.chat import (
+    ConversationSummary,
+    HistoryMessage,
+    StructuredConversationState,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -43,6 +47,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_valid_uuid(val: str) -> bool:
+    try:
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _row_to_summary(row: dict) -> ConversationSummary:
     return ConversationSummary(
         id=row["id"],
@@ -61,6 +73,39 @@ def _cache_summary_key(conv_id: str) -> str:
 
 def _cache_recent_key(conv_id: str) -> str:
     return f"conv:{conv_id}:recent"
+
+
+def _cache_state_key(conv_id: str) -> str:
+    """Redis Cloud state key matching requirement: conv:{conversation_id}:state"""
+    return f"conv:{conv_id}:state"
+
+
+def merge_conversation_state(
+    existing: Optional[StructuredConversationState],
+    updates: Dict[str, Any] | StructuredConversationState,
+) -> StructuredConversationState:
+    """
+    Merge updates into existing structured conversation state following merge semantics.
+    Non-null, non-empty fields in updates override older state while preserving all
+    unrelated fields.
+
+    Example:
+      Existing: origin=Chennai, destination=Punjab, cargo=wheat, date_time=tonight
+      User asks: "What about tomorrow?" -> updates={date_time: "tomorrow"}
+      Result: origin=Chennai, destination=Punjab, cargo=wheat, date_time=tomorrow
+    """
+    base = existing.model_dump() if existing else {}
+    update_dict = (
+        updates.model_dump(exclude_unset=True)
+        if isinstance(updates, StructuredConversationState)
+        else dict(updates)
+    )
+    for k, v in update_dict.items():
+        if v is not None and v != "":
+            base[k] = v
+
+    base["updated_at"] = _now_iso()
+    return StructuredConversationState(**base)
 
 
 async def _redis_get_str(key: str) -> Optional[str]:
@@ -114,7 +159,7 @@ async def get_or_create_conversation(
 
 async def _fetch_conversation(conv_id: str, user_id: str) -> Optional[ConversationSummary]:
     sb = get_supabase()
-    if sb is not None:
+    if sb is not None and user_id != "guest":
         try:
             res = (
                 sb.table("conversations")
@@ -197,35 +242,184 @@ async def add_message(
     await _redis_delete(_cache_recent_key(conversation_id))
 
 
+async def get_conversation_context_and_state(
+    conversation_id: str,
+    user_id: str,
+) -> Tuple[str, List[HistoryMessage], StructuredConversationState]:
+    """
+    Efficiently retrieve rolling summary, recent messages, and structured conversation state
+    using a Redis pipeline where available. Falls back to database/in-memory store.
+    Enforces strict user isolation.
+    """
+    summary: Optional[str] = None
+    recent_msgs: Optional[List[HistoryMessage]] = None
+    state: Optional[StructuredConversationState] = None
+
+    try:
+        from app.core.redis import get_redis_client
+        r = get_redis_client()
+        if r is not None:
+            pipe = r.pipeline()
+            pipe.get(_cache_summary_key(conversation_id))
+            pipe.get(_cache_recent_key(conversation_id))
+            pipe.get(_cache_state_key(conversation_id))
+            res = await pipe.execute()
+            cached_summary, cached_recent_raw, cached_state_raw = res[0], res[1], res[2]
+
+            if cached_summary is not None:
+                summary = cached_summary if isinstance(cached_summary, str) else cached_summary.decode()
+            if cached_recent_raw is not None:
+                try:
+                    raw_str = cached_recent_raw if isinstance(cached_recent_raw, str) else cached_recent_raw.decode()
+                    recent_dicts = json.loads(raw_str)
+                    recent_msgs = [HistoryMessage(**m) for m in recent_dicts]
+                except Exception:
+                    pass
+            if cached_state_raw is not None:
+                try:
+                    raw_str = cached_state_raw if isinstance(cached_state_raw, str) else cached_state_raw.decode()
+                    state_dict = json.loads(raw_str)
+                    # Enforce strict user isolation: only accept if user_id matches or is unassigned
+                    if state_dict.get("user_id") in (None, str(user_id)):
+                        state = StructuredConversationState(**state_dict)
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("Redis pipeline get context failed: %s", exc)
+
+    # If any part missed cache, load from durable store
+    if summary is None or state is None or recent_msgs is None:
+        conv = await _fetch_conversation(conversation_id, user_id)
+        if conv:
+            if summary is None:
+                summary = conv.summary or ""
+            if state is None:
+                async with _mem_lock:
+                    mem_row = _IN_MEMORY_CONVERSATIONS.get(conversation_id, {})
+                    if mem_row and "state" in mem_row:
+                        state = StructuredConversationState(**mem_row["state"])
+        if summary is None:
+            summary = ""
+        if state is None:
+            async with _mem_lock:
+                mem_row = _IN_MEMORY_CONVERSATIONS.get(conversation_id, {})
+                if mem_row and str(mem_row.get("user_id", "")) == str(user_id) and "state" in mem_row:
+                    state = StructuredConversationState(**mem_row["state"])
+            if state is None:
+                state = StructuredConversationState(user_id=user_id, updated_at=_now_iso())
+
+        if recent_msgs is None:
+            recent_msgs = await _fetch_recent_messages(conversation_id, user_id)
+
+        # Repopulate Redis cache via pipeline only for parts that were missed
+        try:
+            from app.core.redis import get_redis_client
+            r = get_redis_client()
+            if r is not None:
+                ttl = settings.conversation_cache_ttl
+                pipe = r.pipeline()
+                if cached_summary is None and summary:
+                    pipe.set(_cache_summary_key(conversation_id), summary, ex=ttl)
+                if cached_recent_raw is None and recent_msgs:
+                    pipe.set(_cache_recent_key(conversation_id), json.dumps([m.model_dump() for m in recent_msgs]), ex=ttl)
+                if cached_state_raw is None and state:
+                    pipe.set(_cache_state_key(conversation_id), json.dumps(state.model_dump()), ex=ttl)
+                await pipe.execute()
+        except Exception as exc:
+            logger.debug("Redis pipeline repopulate failed: %s", exc)
+
+    # Ensure state has user_id set and verified
+    if state is None:
+        state = StructuredConversationState(user_id=user_id, updated_at=_now_iso())
+    elif not state.user_id:
+        state.user_id = user_id
+
+    return summary or "", recent_msgs or [], state
+
+
 async def get_conversation_context(
     conversation_id: str,
     user_id: str,
 ) -> Tuple[str, List[HistoryMessage]]:
     """
-    Return (summary, recent_messages).
-    Tries Redis cache first, falls back to Supabase / in-memory.
+    Return (summary, recent_messages). Backwards-compatible wrapper around pipeline context retrieval.
     """
-    cached_summary = await _redis_get_str(_cache_summary_key(conversation_id))
-    cached_recent_raw = await _redis_get_str(_cache_recent_key(conversation_id))
+    summary, recent, _ = await get_conversation_context_and_state(conversation_id, user_id)
+    return summary, recent
 
-    if cached_summary is not None and cached_recent_raw is not None:
-        try:
-            recent_dicts = json.loads(cached_recent_raw)
-            recent = [HistoryMessage(**m) for m in recent_dicts]
-            return cached_summary, recent
-        except Exception:
-            pass
 
-    conv = await _fetch_conversation(conversation_id, user_id)
-    summary = conv.summary if conv else ""
-    recent_msgs = await _fetch_recent_messages(conversation_id, user_id)
-
+async def save_conversation_state(
+    conversation_id: str,
+    user_id: str,
+    state: StructuredConversationState,
+) -> None:
+    """
+    Persist structured conversation state:
+    1. Set in shared Redis Cloud at conv:{conversation_id}:state with TTL.
+    2. Persist synchronously in DB / in-memory store for durable storage.
+    Strictly isolated: state.user_id is stamped and verified.
+    """
+    state.user_id = user_id
+    state_json = json.dumps(state.model_dump())
     ttl = settings.conversation_cache_ttl
-    await _redis_set_str(_cache_summary_key(conversation_id), summary, ttl)
-    recent_json = json.dumps([m.model_dump() for m in recent_msgs])
-    await _redis_set_str(_cache_recent_key(conversation_id), recent_json, ttl)
 
-    return summary, recent_msgs
+    # 1. Fast Redis Cloud write (non-fatal if Redis unreachable)
+    try:
+        await _redis_set_str(_cache_state_key(conversation_id), state_json, ttl)
+    except Exception as exc:
+        logger.warning("Redis state write failed: %s", exc)
+
+    # 2. Durable database write
+    sb = get_supabase()
+    if sb is not None and user_id != "guest":
+        try:
+            sb.table("conversations").update({
+                "updated_at": _now_iso(),
+            }).eq("id", conversation_id).eq("user_id", user_id).execute()
+        except Exception as exc:
+            logger.warning("Supabase update state timestamp failed: %s", exc)
+
+    async with _mem_lock:
+        if conversation_id not in _IN_MEMORY_CONVERSATIONS:
+            _IN_MEMORY_CONVERSATIONS[conversation_id] = {
+                "id": conversation_id,
+                "user_id": user_id,
+                "created_at": _now_iso(),
+            }
+        if str(_IN_MEMORY_CONVERSATIONS[conversation_id].get("user_id", "")) == str(user_id):
+            _IN_MEMORY_CONVERSATIONS[conversation_id]["state"] = state.model_dump()
+            _IN_MEMORY_CONVERSATIONS[conversation_id]["updated_at"] = _now_iso()
+
+
+async def get_conversation_state(
+    conversation_id: str,
+    user_id: str,
+) -> Optional[StructuredConversationState]:
+    """Retrieve structured state from Redis or DB with user isolation check."""
+    _, _, state = await get_conversation_context_and_state(conversation_id, user_id)
+    return state
+
+
+async def async_summarize_if_needed(
+    conversation_id: str,
+    user_id: str,
+    existing_summary: str,
+    recent_messages: List[HistoryMessage],
+) -> Optional[str]:
+    """
+    Run rolling summarization asynchronously via FastAPI BackgroundTasks.
+    Never blocks the main chat response.
+    """
+    try:
+        return await check_and_trigger_summarization(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            existing_summary=existing_summary,
+            recent_messages=recent_messages,
+        )
+    except Exception as exc:
+        logger.error("Background summarization error for conv=%s: %s", conversation_id, exc)
+        return None
 
 
 async def _fetch_recent_messages(
@@ -237,7 +431,7 @@ async def _fetch_recent_messages(
     msgs: List[dict] = []
 
     sb = get_supabase()
-    if sb is not None:
+    if sb is not None and user_id != "guest":
         try:
             res = (
                 sb.table("messages")
@@ -337,11 +531,13 @@ async def check_and_trigger_summarization(
         return None
 
     all_msgs = await _fetch_all_messages_for_summarization(conversation_id, user_id)
-    older_count = max(0, len(all_msgs) - limit)
-    if older_count == 0:
-        return None
+    if not all_msgs and recent_messages:
+        all_msgs = recent_messages
 
-    messages_to_summarize = all_msgs[:older_count]
+    older_count = max(0, len(all_msgs) - limit)
+    messages_to_summarize = all_msgs[:older_count] if older_count > 0 else all_msgs
+    if not messages_to_summarize:
+        return None
     logger.info(
         "Summarization triggered for conv=%s: total=%d, summarizing %d older messages",
         conversation_id, total, len(messages_to_summarize)

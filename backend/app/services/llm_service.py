@@ -26,6 +26,7 @@ from app.schemas.chat import (
     AlertSuggestion,
     HistoryMessage,
     RouteWaypoint,
+    StructuredConversationState,
     TravelCardData,
     WeatherData,
 )
@@ -70,7 +71,8 @@ STRICT RULES:
 1. Base all numerical weather assessments on the provided JSON blocks (current weather, 7-day forecast, tonight conditions, and route corridor waypoints). Do not fabricate numbers.
 2. Provide concise, clear, and highly actionable advice (typically 3-6 sentences).
 3. For dangerous weather (storms, flash floods, dense fog), prioritize user and cargo safety.
-4. You have access to conversation history — use it to give contextual, coherent responses.
+4. You have access to conversation history and [CURRENT CONVERSATION STATE] — use them to naturally resolve ambiguous follow-ups, pronoun references ('there', 'it', 'the crop'), and temporal shifts ('what about tomorrow', 'when should I go', 'what about evening', 'is that better').
+5. If the user introduces or changes their travel destination, cargo, or activity, adapt seamlessly. You may optionally append a compact internal state tag at the very end of your response: <!--STATE: {"activity": "...", "cargo": "...", "date_time": "..."} -->.
 """
 
 _ALERT_DETECTION_PROMPT = """\
@@ -183,35 +185,10 @@ def _rule_based_alert_intent(user_message: str) -> Optional[dict]:
 
 async def _detect_alert_intent(user_message: str) -> Optional[dict]:
     """
-    Detect if the message contains alert intent using fast rules first,
-    falling back to LLM completion for ambiguous phrasings.
+    Detect if the message contains alert intent deterministically.
+    Ensures exactly ONE LLM completion call in the normal chat flow.
     """
-    # 1. Fast deterministic check
-    fast_result = _rule_based_alert_intent(user_message)
-    if fast_result:
-        return fast_result
-
-    # 2. LLM fallback
-    client = _get_groq_client()
-    try:
-        completion = await client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": _ALERT_DETECTION_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            model=settings.groq_model,
-            temperature=0.0,
-            max_tokens=100,
-        )
-        raw = completion.choices[0].message.content or ""
-        match = re.search(r"\{.*\}", raw.strip(), re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-            if data.get("intent") is True:
-                return data
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Alert intent detection fallback failed: %s", exc)
-    return None
+    return _rule_based_alert_intent(user_message)
 
 
 async def generate_conversation_summary(
@@ -273,6 +250,7 @@ async def generate_weather_response(
     route_waypoints: Optional[List[RouteWaypoint]] = None,
     travel_card: Optional[TravelCardData] = None,
     conversation_summary: Optional[str] = None,
+    conversation_state: Optional[StructuredConversationState] = None,
 ) -> str:
     """
     Call Groq and return its answer as a plain string.
@@ -347,12 +325,36 @@ async def generate_weather_response(
 
     user_content = f"{weather_context}{alert_note}{travel_card_note}\n\nUser question: {user_question}"
 
-    # Build hybrid memory context: summary + sliding window
-    # conversation_summary captures older context (outside sliding window)
-    # history carries the recent sliding window turns
+    # Build hybrid memory context: structured state + rolling summary + sliding window
     memory_prefix = ""
+    if conversation_state:
+        state_parts = []
+        if conversation_state.active_location:
+            state_parts.append(f"Active location: {conversation_state.active_location}")
+        if conversation_state.origin and conversation_state.destination:
+            state_parts.append(f"Route: {conversation_state.origin} -> {conversation_state.destination}")
+        elif conversation_state.destination:
+            state_parts.append(f"Destination: {conversation_state.destination}")
+        if conversation_state.activity:
+            state_parts.append(f"Activity: {conversation_state.activity}")
+        if conversation_state.cargo:
+            state_parts.append(f"Cargo / Produce: {conversation_state.cargo}")
+        if conversation_state.date_time:
+            state_parts.append(f"Timing / Date: {conversation_state.date_time}")
+        if conversation_state.current_weather_concern:
+            state_parts.append(f"Weather concern: {conversation_state.current_weather_concern}")
+        if conversation_state.previous_recommendation:
+            state_parts.append(f"Previous advice: {conversation_state.previous_recommendation}")
+
+        if state_parts:
+            memory_prefix += (
+                "[CURRENT CONVERSATION STATE — active memory for resolving 'there', 'it', 'the crop', etc.]\n"
+                + "\n".join(f"- {line}" for line in state_parts)
+                + "\n\n"
+            )
+
     if conversation_summary and conversation_summary.strip():
-        memory_prefix = (
+        memory_prefix += (
             f"[CONVERSATION BACKGROUND — facts from earlier in this session, use for context resolution]\n"
             f"{conversation_summary.strip()}\n\n"
         )
@@ -389,6 +391,39 @@ async def generate_weather_response(
 
     logger.info("Groq LLM response received successfully")
     return answer
+
+
+def extract_and_validate_llm_state_updates(raw_answer: str) -> tuple[str, dict]:
+    """
+    Extract optional <!--STATE: {...} --> tag from LLM answer, validate its contents,
+    and return (clean_answer, validated_updates_dict).
+    Never blindly trust LLM-generated state.
+    """
+    if not raw_answer:
+        return "", {}
+    m = re.search(r"<!--\s*STATE:\s*(\{.*?\})\s*-->", raw_answer, re.DOTALL)
+    if not m:
+        return raw_answer, {}
+
+    clean_answer = re.sub(r"<!--\s*STATE:\s*(\{.*?\})\s*-->", "", raw_answer, flags=re.DOTALL).strip()
+    raw_json = m.group(1)
+    validated = {}
+    try:
+        data = json.loads(raw_json)
+        if isinstance(data, dict):
+            allowed_fields = {
+                "active_location", "origin", "destination", "activity",
+                "cargo", "date_time", "current_weather_concern", "previous_recommendation"
+            }
+            for k, v in data.items():
+                if k in allowed_fields and isinstance(v, str):
+                    v_clean = v.strip()
+                    if 0 < len(v_clean) < 100:
+                        validated[k] = v_clean
+    except Exception as exc:
+        logger.debug("Failed parsing optional LLM state updates: %s", exc)
+
+    return clean_answer, validated
 
 
 async def build_alert_suggestion(

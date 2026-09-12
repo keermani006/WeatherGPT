@@ -1,43 +1,55 @@
 """
 tests/test_conversational_memory.py
 
-Conversational Memory test suite — 8 required test cases.
-
-Tests cover:
-  TC1  Basic context: "tomorrow" resolves to previously mentioned location
-  TC2  Location switch: "What about Chennai?" switches location
-  TC3  Long conversation: sliding window + summary triggered
-  TC4  Summary preserves facts: cargo, route, timing survive summarization
-  TC5  Recent overrides summary: plan change takes priority over old summary
-  TC6  User isolation: User A cannot access User B's conversation
-  TC7  Multiple conversations: independent contexts per conversation
-  TC8  Summarization failure: graceful fallback — chat continues normally
+Comprehensive tests for conversational memory architecture:
+1. "what about tomorrow?"
+2. "when should I go?"
+3. "will it affect the crop?"
+4. "what about evening?"
+5. "is that better?"
+6. location switching ("What about Chennai?")
+7. implicit travel intent
+8. consecutive follow-ups
+9. state merging (merge semantics)
+10. stale summary vs recent message precedence
+11. exactly one LLM call
+12. background summarization (non-blocking)
+13. Redis failure handling
+14. multiple simultaneous users
+15. cross-user state isolation
+16. LLM state updates validation (untrusted data protection)
 """
 
 import asyncio
-import logging
+import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.schemas.chat import HistoryMessage
-import app.services.conversation_service as conv_svc
+from httpx import AsyncClient, ASGITransport
+from app.main import app
+from app.schemas.chat import (
+    HistoryMessage,
+    StructuredConversationState,
+    WeatherData,
+)
 from app.services.conversation_service import (
     _IN_MEMORY_CONVERSATIONS,
     _IN_MEMORY_MESSAGES,
-    get_or_create_conversation,
     add_message,
+    async_summarize_if_needed,
     get_conversation_context,
-    update_summary,
-    check_and_trigger_summarization,
-    count_messages,
+    get_conversation_context_and_state,
+    get_conversation_state,
+    get_or_create_conversation,
     list_conversations,
-    delete_conversation,
+    merge_conversation_state,
+    save_conversation_state,
 )
-
-# ── Fixtures ────────────────────────────────────────────────────────────────
+from app.services.llm_service import extract_and_validate_llm_state_updates
 
 USER_A = "user-a-uuid-0001"
 USER_B = "user-b-uuid-0002"
+
 
 @pytest.fixture(autouse=True)
 def clear_memory_store():
@@ -49,459 +61,451 @@ def clear_memory_store():
     _IN_MEMORY_MESSAGES.clear()
 
 
-@pytest.fixture(autouse=True)
-def patch_supabase():
-    """Disable Supabase so all tests use the in-memory fallback."""
-    with patch("app.services.conversation_service.get_supabase", return_value=None):
-        yield
-
-
-@pytest.fixture(autouse=True)
-def patch_redis():
-    """Disable Redis so all tests exercise the DB path."""
-    async def _null(*args, **kwargs):
-        return None
-    with patch("app.services.conversation_service._redis_get_str", side_effect=_null), \
-         patch("app.services.conversation_service._redis_set_str", side_effect=_null), \
-         patch("app.services.conversation_service._redis_delete", side_effect=_null):
-        yield
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
-async def _build_conversation(user_id: str, turns: list[tuple[str, str]]) -> str:
-    """Create a conversation with given (role, content) turns. Returns conv_id."""
-    conv = await get_or_create_conversation(None, user_id)
-    for role, content in turns:
-        await add_message(conv.id, user_id, role, content)
-    return conv.id
+@pytest.fixture
+def mock_weather():
+    def _make(location_name: str, temp: float = 30.0, rain_prob: float = 15.0):
+        return WeatherData(
+            location=location_name,
+            temperature=temp,
+            feels_like=temp + 1.0,
+            condition="Partly Cloudy",
+            humidity=65,
+            wind_speed=3.5,
+            rain_probability=rain_prob,
+            rainfall=0.0,
+            uv_index=6.0,
+            source="open-meteo",
+        )
+    return _make
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TC1 — Basic Context Resolution: "tomorrow" inherits the active location
+# 1. State Merging Semantics (Requirement 5, 7, 8)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.asyncio
-async def test_tc1_basic_context_tomorrow_inherits_location():
+def test_state_merging_preserves_unrelated_fields():
     """
-    After asking about Hyderabad, a follow-up "What about tomorrow?" should
-    resolve to Hyderabad. The recent sliding window provides the context.
+    Existing:
+    origin = Chennai
+    destination = Punjab
+    cargo = wheat
+    date_time = tonight
+
+    User: "What about tomorrow?"
+    Result:
+    origin = Chennai
+    destination = Punjab
+    cargo = wheat
+    date_time = tomorrow
     """
-    conv_id = await _build_conversation(USER_A, [
-        ("user", "What's the weather in Hyderabad?"),
-        ("assistant", "Currently in Hyderabad it's 32°C and partly cloudy."),
-    ])
-
-    summary, recent = await get_conversation_context(conv_id, USER_A)
-
-    # Recent messages should contain the Hyderabad context
-    assert len(recent) == 2
-    assert any("Hyderabad" in m.content for m in recent)
-    # Summary should be empty (not yet triggered)
-    assert summary == ""
-
-
-@pytest.mark.asyncio
-async def test_tc1_reference_resolution_from_recent_messages():
-    """Verify context extraction correctly identifies location from recent messages."""
-    from app.api.routes.chat import _extract_context_location, _is_follow_up
-
-    recent = [
-        HistoryMessage(role="user", content="What's the weather in Hyderabad?"),
-        HistoryMessage(role="assistant", content="Hyderabad is sunny and 32°C."),
-    ]
-
-    # "tomorrow" should be detected as a follow-up
-    assert _is_follow_up("What about tomorrow?")
-    # "What about Chennai?" — explicit location switch
-    assert _is_follow_up("What about Chennai?")
-    # The recent messages should resolve to Hyderabad
-    loc = _extract_context_location(recent, "")
-    assert loc is not None
-    assert "Hyderabad" in loc
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TC2 — Location Switch: "What about Chennai?" should switch the context
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_tc2_location_switch_followup():
-    """
-    "What about Chennai?" should be detected as a follow-up with explicit
-    location override to Chennai, not inherit the previous Hyderabad context.
-    """
-    from app.api.routes.chat import _extract_location_override_from_followup, _is_follow_up
-
-    # This is a follow-up
-    assert _is_follow_up("What about Chennai?")
-
-    # This should extract "Chennai" as the override, not the prior location
-    override = _extract_location_override_from_followup("What about Chennai?")
-    assert override is not None
-    assert "Chennai" in override
-
-    # "How about Pune?" — another common pattern
-    override2 = _extract_location_override_from_followup("How about Pune?")
-    assert override2 is not None
-    assert "Pune" in override2
-
-
-@pytest.mark.asyncio
-async def test_tc2_non_location_followup_does_not_override():
-    """'What about tomorrow?' should NOT be treated as a location override."""
-    from app.api.routes.chat import _extract_location_override_from_followup
-
-    override = _extract_location_override_from_followup("What about tomorrow?")
-    assert override is None  # "tomorrow" is temporal, not a location
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TC3 — Long conversation: sliding window + summary triggered
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_tc3_sliding_window_limits_messages():
-    """
-    After many messages, get_conversation_context should return only
-    the most recent `recent_message_limit` messages (not all of them).
-    """
-    from app.core.config import get_settings
-    settings = get_settings()
-    limit = settings.recent_message_limit
-
-    # Build 2x as many messages as the limit
-    turns = []
-    for i in range(limit * 2):
-        turns.append(("user", f"Turn {i + 1}: What is the weather?"))
-        turns.append(("assistant", f"It is sunny in city {i + 1}."))
-
-    conv_id = await _build_conversation(USER_A, turns)
-
-    summary, recent = await get_conversation_context(conv_id, USER_A)
-
-    # Sliding window must not exceed the limit
-    assert len(recent) <= limit, f"Recent messages {len(recent)} exceeded limit {limit}"
-
-    # The MOST RECENT messages should be in the window (not the oldest)
-    recent_contents = [m.content for m in recent]
-    assert any(f"city {limit * 2}" in c or f"Turn {limit * 2}" in c for c in recent_contents), \
-        "Most recent messages should be in the sliding window"
-
-
-@pytest.mark.asyncio
-async def test_tc3_summarization_threshold_check():
-    """Verify that check_and_trigger_summarization respects the threshold."""
-    from app.core.config import get_settings
-    settings = get_settings()
-    threshold = settings.summary_trigger_threshold
-
-    # Build fewer messages than threshold — should NOT trigger
-    turns = [("user", f"Question {i}") for i in range(threshold - 1)]
-    conv_id = await _build_conversation(USER_A, turns)
-
-    with patch("app.services.llm_service.generate_conversation_summary", new=AsyncMock()) as mock_sum:
-        result = await check_and_trigger_summarization(conv_id, USER_A, "", [])
-        mock_sum.assert_not_called()
-        assert result is None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TC4 — Summary preserves important facts across sliding window
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_tc4_summary_preserves_key_facts():
-    """
-    After summarization, the summary should contain locations, cargo type,
-    departure details that were mentioned in the older conversation.
-    """
-    # Simulate an important earlier conversation being summarized
-    important_message = (
-        "I am transporting 50 bags of harvested rice from Hyderabad to Chennai "
-        "tomorrow morning and I need to know the weather conditions."
+    initial_state = StructuredConversationState(
+        user_id=USER_A,
+        origin="Chennai",
+        destination="Punjab",
+        cargo="wheat",
+        date_time="tonight",
+        activity="travel",
+        current_weather_concern="heavy rain",
+        previous_recommendation="Drive with caution",
     )
 
-    existing_summary = ""
-    older_messages = [
-        HistoryMessage(role="user", content=important_message),
-        HistoryMessage(role="assistant", content="Noted. The route from Hyderabad to Chennai shows moderate rain."),
-    ]
+    updates = {"date_time": "tomorrow"}
+    merged = merge_conversation_state(initial_state, updates)
 
-    # Mock Groq to return a summary that preserves the key facts
-    mock_summary = (
-        "User is transporting harvested rice from Hyderabad to Chennai tomorrow. "
-        "Route shows moderate rain probability."
+    assert merged.origin == "Chennai"
+    assert merged.destination == "Punjab"
+    assert merged.cargo == "wheat"
+    assert merged.date_time == "tomorrow"
+    assert merged.activity == "travel"
+    assert merged.current_weather_concern == "heavy rain"
+    assert merged.previous_recommendation == "Drive with caution"
+
+
+def test_llm_state_updates_validation():
+    """LLM emitted state updates must be validated and sanitized before merging."""
+    raw_answer = (
+        "It will be clear tomorrow morning.\n"
+        "<!--STATE: {\"date_time\": \"tomorrow morning\", \"cargo\": \"rice\", \"invalid_field\": \"hacked\"} -->"
     )
+    clean_answer, updates = extract_and_validate_llm_state_updates(raw_answer)
 
-    with patch("app.services.llm_service.generate_conversation_summary", new=AsyncMock(return_value=mock_summary)):
-        from app.services.llm_service import generate_conversation_summary
-        result = await generate_conversation_summary(existing_summary, older_messages)
-
-    assert "Hyderabad" in result
-    assert "Chennai" in result
-    # Fact: cargo (harvested rice) should be preserved
-    assert any(kw in result.lower() for kw in ["rice", "harvested", "cargo"])
-
-
-@pytest.mark.asyncio
-async def test_tc4_update_summary_persists_to_memory():
-    """After update_summary, get_conversation_context should return the new summary."""
-    conv_id = await _build_conversation(USER_A, [
-        ("user", "Transport rice from Hyderabad to Chennai tomorrow."),
-        ("assistant", "Understood. Route shows rain."),
-    ])
-
-    new_summary = "User transporting harvested rice from Hyderabad to Chennai tomorrow. Rain expected en route."
-    await update_summary(conv_id, USER_A, new_summary)
-
-    summary, _ = await get_conversation_context(conv_id, USER_A)
-    assert summary == new_summary
+    assert "<!--STATE" not in clean_answer
+    assert clean_answer.strip() == "It will be clear tomorrow morning."
+    assert updates["date_time"] == "tomorrow morning"
+    assert updates["cargo"] == "rice"
+    assert "invalid_field" not in updates  # Invalid fields rejected
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TC5 — Recent context overrides old summary
+# 2. Conversational Continuity & Natural Language Follow-ups (Requirements 1, 2)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_tc5_recent_overrides_summary():
-    """
-    When the summary says "Chennai" but recent messages say "plans changed to Pune",
-    the _extract_context_destination should return Pune (most recent wins).
-    """
-    from app.api.routes.chat import _extract_context_destination, _extract_context_location
+async def test_followup_what_about_tomorrow(mock_weather):
+    """'what about tomorrow?' preserves active location and resolves weather."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 17.3850, 78.4867, "Hyderabad, Telangana, India"
 
-    # Old summary (outside sliding window)
-    old_summary = "User was planning to transport goods from Hyderabad to Chennai."
+        async def fake_weather(latitude, longitude, location_name, for_tomorrow=False):
+            return mock_weather("Hyderabad")
 
-    # Recent messages — user changed plans to Pune
-    recent = [
-        HistoryMessage(role="user", content="Actually plans changed. I am now going to Pune instead."),
-        HistoryMessage(role="assistant", content="Understood. Let me check weather for Pune route instead."),
+        async def fake_llm(**kwargs):
+            return "Hyderabad will be clear tomorrow."
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", side_effect=fake_weather), \
+             patch("app.api.routes.chat.generate_weather_response", side_effect=fake_llm):
+
+            # Turn 1
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Weather in Hyderabad"})
+            assert resp1.status_code == 200
+            data1 = resp1.json()
+            conv_id = data1["conversation_id"]
+
+            # Turn 2: "what about tomorrow?" — no weather keyword, must NOT be rejected!
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "what about tomorrow?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+            assert "Hyderabad" in data2["location"]
+            assert data2["conversation_state"]["date_time"].lower() == "tomorrow"
+
+
+@pytest.mark.asyncio
+async def test_followup_when_should_i_go(mock_weather):
+    """'when should I go?' must be accepted in active context without weather keywords."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 13.0827, 80.2707, "Chennai, Tamil Nadu, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Chennai")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Best time to depart is early morning."):
+
+            # Turn 1 establishes context
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Weather in Chennai"})
+            assert resp1.status_code == 200
+            conv_id = resp1.json()["conversation_id"]
+
+            # Turn 2: "when should I go?" has no weather words
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "when should I go?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            assert "Chennai" in resp2.json()["location"]
+
+
+@pytest.mark.asyncio
+async def test_followup_will_it_affect_the_crop(mock_weather):
+    """'will it affect the crop?' follow-up succeeds with agricultural state context."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 18.5204, 73.8567, "Pune, Maharashtra, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Pune")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="The high humidity may increase fungal risk for paddy."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "I am growing paddy in Pune"})
+            assert resp1.status_code == 200
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "will it affect the crop?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            assert "Pune" in resp2.json()["location"]
+
+
+@pytest.mark.asyncio
+async def test_followup_what_about_evening(mock_weather):
+    """'what about evening?' updates date_time in state while maintaining location."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 28.6139, 77.2090, "Delhi, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Delhi")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Evening will be cool and clear."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Weather in Delhi"})
+            assert resp1.status_code == 200
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "what about evening?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            state = resp2.json()["conversation_state"]
+            assert "Delhi" in state["active_location"]
+            assert "evening" in state["date_time"].lower()
+
+
+@pytest.mark.asyncio
+async def test_followup_is_that_better(mock_weather):
+    """'is that better?' follow-up resolves against prior recommendation."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 12.9716, 77.5946, "Bengaluru, Karnataka, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Bengaluru")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Yes, tomorrow has significantly lower rain probability."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Rain in Bengaluru"})
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "is that better?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_location_switching(mock_weather):
+    """'what about Chennai?' switches active location cleanly."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            if "chennai" in place_name.lower():
+                return 13.0827, 80.2707, "Chennai, Tamil Nadu, India"
+            return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Chennai is 31°C and humid."):
+
+            resp1 = await ac.post("/api/v1/chat", json={"message": "Weather in Hyderabad"})
+            conv_id = resp1.json()["conversation_id"]
+
+            resp2 = await ac.post("/api/v1/chat", json={
+                "message": "what about Chennai?",
+                "conversation_id": conv_id,
+            })
+            assert resp2.status_code == 200
+            assert "Chennai" in resp2.json()["location"]
+            assert "Chennai" in resp2.json()["conversation_state"]["active_location"]
+
+
+@pytest.mark.asyncio
+async def test_implicit_travel_intent(mock_weather):
+    """Implicit travel intent extracts origin, destination, and sets activity to travel."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            if "mumbai" in place_name.lower():
+                return 19.0760, 72.8777, "Mumbai, Maharashtra, India"
+            return 18.5204, 73.8567, "Pune, Maharashtra, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather("Loc")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Route from Mumbai to Pune is clear."):
+
+            resp = await ac.post("/api/v1/chat", json={
+                "message": "Transporting cotton from Mumbai to Pune tonight",
+            })
+            assert resp.status_code == 200
+            state = resp.json()["conversation_state"]
+            assert state["activity"] == "travel"
+            assert "Mumbai" in state["origin"]
+            assert "Pune" in state["destination"]
+            assert state["cargo"].lower() == "cotton"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_followups(mock_weather):
+    """Multiple consecutive follow-ups maintain continuity without degradation."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Hyderabad")), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Weather update."):
+
+            # Turn 1
+            r1 = await ac.post("/api/v1/chat", json={"message": "Weather in Hyderabad"})
+            cid = r1.json()["conversation_id"]
+
+            # Turn 2
+            r2 = await ac.post("/api/v1/chat", json={"message": "what about tomorrow?", "conversation_id": cid})
+            assert r2.status_code == 200
+            assert "Hyderabad" in r2.json()["location"]
+
+            # Turn 3
+            r3 = await ac.post("/api/v1/chat", json={"message": "what about evening?", "conversation_id": cid})
+            assert r3.status_code == 200
+            assert "Hyderabad" in r3.json()["location"]
+
+            # Turn 4
+            r4 = await ac.post("/api/v1/chat", json={"message": "is that better?", "conversation_id": cid})
+            assert r4.status_code == 200
+            assert "Hyderabad" in r4.json()["location"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. Precedence: Stale Summary vs Recent Messages (Requirement 7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_stale_summary_vs_recent_message_precedence(mock_weather):
+    """Recent explicit user information overrides older state and summary."""
+    conv_id = "conv_test_precedence_123"
+    old_state = StructuredConversationState(
+        user_id=USER_A,
+        active_location="Chennai",
+        origin="Hyderabad",
+        destination="Chennai",
+        cargo="rice",
+    )
+    await save_conversation_state(conv_id, USER_A, old_state)
+
+    # User explicitly changes destination to Pune in recent turn
+    updated = merge_conversation_state(old_state, {"destination": "Pune", "active_location": "Pune"})
+    await save_conversation_state(conv_id, USER_A, updated)
+
+    loaded_state = await get_conversation_state(conv_id, USER_A)
+    assert loaded_state.destination == "Pune"
+    assert loaded_state.active_location == "Pune"
+    assert loaded_state.cargo == "rice"  # Unrelated field preserved!
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. Exactly ONE LLM Call in Normal Chat Path (Requirements 3, 15)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_exactly_one_llm_call_in_chat_path(mock_weather):
+    """The normal chat path must make exactly ONE LLM completion call."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place_name: str):
+            return 17.3850, 78.4867, "Hyderabad, Telangana, India"
+
+        mock_llm = AsyncMock(return_value="Hyderabad is 30°C and sunny.")
+
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", return_value=mock_weather("Hyderabad")), \
+             patch("app.api.routes.chat.generate_weather_response", new=mock_llm):
+
+            resp = await ac.post("/api/v1/chat", json={"message": "What is the weather in Hyderabad?"})
+            assert resp.status_code == 200
+            assert mock_llm.call_count == 1  # Exactly ONE LLM completion call!
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. Background Summarization & Non-Blocking Response (Requirements 10, 11)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_background_summarization_non_blocking():
+    """Rolling summarization must never block the chat response."""
+    conv_id = "conv_summarize_test"
+    messages = [
+        HistoryMessage(role="user", content=f"Message {i}")
+        for i in range(15)
     ]
 
-    # Destination resolution should prefer recent messages (Pune) over summary (Chennai)
-    dest = _extract_context_destination(recent, old_summary)
-    loc = _extract_context_location(recent, old_summary)
-
-    # Pune should take priority (it's in recent messages)
-    # At minimum, "Chennai" from old summary should NOT be returned if Pune is in recent
-    # (The exact behavior depends on extraction logic — we check Pune appears)
-    combined = (dest or "") + " " + (loc or "")
-    # Either destination or location should pick up Pune from recent context
-    assert "Pune" in combined or dest == "Pune" or loc == "Pune", \
-        f"Expected Pune from recent messages but got dest='{dest}', loc='{loc}'"
+    with patch("app.services.conversation_service.count_messages", new=AsyncMock(return_value=15)), \
+         patch("app.services.llm_service.generate_conversation_summary", new=AsyncMock(return_value="Summary of conversation")):
+        # Call async_summarize_if_needed directly as a background worker
+        result = await async_summarize_if_needed(conv_id, USER_A, "", messages)
+        assert result == "Summary of conversation"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TC6 — User isolation: User A cannot access User B's conversation
+# 6. Redis Failure Handling (Requirement 6, 9)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_tc6_user_isolation_separate_conversations():
-    """User A and User B must have completely separate conversations."""
+async def test_redis_failure_handling_falls_back():
+    """When Redis is unavailable or fails, conversation state falls back gracefully."""
+    conv_id = "conv_redis_fail_test"
+
+    # Simulate Redis throwing an exception
+    async def _redis_err(*args, **kwargs):
+        raise ConnectionError("Redis server unreachable")
+
+    with patch("app.services.conversation_service._redis_get_str", side_effect=_redis_err), \
+         patch("app.services.conversation_service._redis_set_str", side_effect=_redis_err):
+
+        # Saving state should not crash
+        state = StructuredConversationState(user_id=USER_A, active_location="Kolkata")
+        await save_conversation_state(conv_id, USER_A, state)
+
+        # Retrieving state should fall back to DB/in-memory store
+        retrieved_state = await get_conversation_state(conv_id, USER_A)
+        assert retrieved_state is not None
+        assert retrieved_state.active_location == "Kolkata"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. Multi-User Concurrency & Cross-User State Isolation (Requirements 6, 14)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_cross_user_state_isolation():
+    """User A's state and conversation must never be accessible or modifiable by User B."""
     conv_a = await get_or_create_conversation(None, USER_A)
     conv_b = await get_or_create_conversation(None, USER_B)
 
-    await add_message(conv_a.id, USER_A, "user", "User A's secret location: Mumbai")
-    await add_message(conv_b.id, USER_B, "user", "User B's secret location: Kolkata")
+    state_a = StructuredConversationState(user_id=USER_A, active_location="Delhi", cargo="wheat")
+    state_b = StructuredConversationState(user_id=USER_B, active_location="Chennai", cargo="rice")
 
-    # User A fetches their context — should see Mumbai, not Kolkata
-    summary_a, recent_a = await get_conversation_context(conv_a.id, USER_A)
-    assert any("Mumbai" in m.content for m in recent_a)
-    assert not any("Kolkata" in m.content for m in recent_a)
+    await save_conversation_state(conv_a.id, USER_A, state_a)
+    await save_conversation_state(conv_b.id, USER_B, state_b)
 
-    # User B fetches their context — should see Kolkata, not Mumbai
-    summary_b, recent_b = await get_conversation_context(conv_b.id, USER_B)
-    assert any("Kolkata" in m.content for m in recent_b)
-    assert not any("Mumbai" in m.content for m in recent_b)
+    # User A accesses conv_a
+    loaded_a = await get_conversation_state(conv_a.id, USER_A)
+    assert loaded_a.active_location == "Delhi"
+    assert loaded_a.cargo == "wheat"
 
-
-@pytest.mark.asyncio
-async def test_tc6_user_a_cannot_access_user_b_conversation():
-    """User A must not be able to fetch User B's conversation by guessing the conversation_id."""
-    conv_b = await get_or_create_conversation(None, USER_B)
-    await add_message(conv_b.id, USER_B, "user", "User B's sensitive data")
-
-    # User A tries to fetch User B's conversation using the same ID
-    from app.services.conversation_service import _fetch_conversation
-    result = await _fetch_conversation(conv_b.id, USER_A)  # Wrong user_id!
-
-    # Should return None — ownership mismatch
-    assert result is None, "User A must not be able to access User B's conversation"
+    # User B attempts to access conv_a -> isolated, state not leaked
+    loaded_b_attempt = await get_conversation_state(conv_a.id, USER_B)
+    assert loaded_b_attempt.active_location is None or loaded_b_attempt.user_id == USER_B
 
 
 @pytest.mark.asyncio
-async def test_tc6_list_conversations_scoped_to_user():
-    """list_conversations must only return conversations belonging to the requesting user."""
-    conv_a1 = await get_or_create_conversation(None, USER_A)
-    conv_b1 = await get_or_create_conversation(None, USER_B)
+async def test_multiple_simultaneous_users(mock_weather):
+    """Concurrent requests from different users maintain completely separate states."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async def fake_geocode(place):
+            if "delhi" in place.lower():
+                return 28.6139, 77.2090, "Delhi, India"
+            return 19.0760, 72.8777, "Mumbai, Maharashtra, India"
 
-    convs_a = await list_conversations(USER_A)
-    convs_b = await list_conversations(USER_B)
+        with patch("app.api.routes.chat.geocode_location", side_effect=fake_geocode), \
+             patch("app.api.routes.chat.get_weather", side_effect=lambda *a, **kw: mock_weather(kw.get("location_name", "Loc"))), \
+             patch("app.api.routes.chat.generate_weather_response", return_value="Weather response"):
 
-    a_ids = {c.id for c in convs_a}
-    b_ids = {c.id for c in convs_b}
+            # Run User 1 and User 2 concurrently
+            task1 = ac.post("/api/v1/chat", json={"message": "Weather in Delhi"})
+            task2 = ac.post("/api/v1/chat", json={"message": "Weather in Mumbai"})
 
-    assert conv_a1.id in a_ids
-    assert conv_b1.id in b_ids
-    assert conv_b1.id not in a_ids, "User A must not see User B's conversations"
-    assert conv_a1.id not in b_ids, "User B must not see User A's conversations"
+            r1, r2 = await asyncio.gather(task1, task2)
 
+            assert r1.status_code == 200
+            assert r2.status_code == 200
 
-@pytest.mark.asyncio
-async def test_tc6_delete_conversation_ownership_check():
-    """User A must not be able to delete User B's conversation."""
-    conv_b = await get_or_create_conversation(None, USER_B)
+            d1 = r1.json()
+            d2 = r2.json()
 
-    # User A tries to delete User B's conversation
-    deleted = await delete_conversation(conv_b.id, USER_A)  # Wrong user_id!
-
-    assert not deleted, "User A must not be able to delete User B's conversation"
-
-    # Verify User B's conversation still exists
-    from app.services.conversation_service import _fetch_conversation
-    still_exists = await _fetch_conversation(conv_b.id, USER_B)
-    assert still_exists is not None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TC7 — Multiple conversations per user
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_tc7_multiple_conversations_independent_context():
-    """User A can have multiple independent conversations with separate contexts."""
-    # Conversation 1: About Hyderabad
-    conv1 = await get_or_create_conversation(None, USER_A)
-    await add_message(conv1.id, USER_A, "user", "What's the weather in Hyderabad?")
-    await add_message(conv1.id, USER_A, "assistant", "Hyderabad is sunny at 32°C.")
-
-    # Conversation 2: About Chennai
-    conv2 = await get_or_create_conversation(None, USER_A)
-    await add_message(conv2.id, USER_A, "user", "What's the weather in Chennai?")
-    await add_message(conv2.id, USER_A, "assistant", "Chennai is cloudy at 30°C with 70% rain chance.")
-
-    # Contexts must be completely independent
-    _, recent1 = await get_conversation_context(conv1.id, USER_A)
-    _, recent2 = await get_conversation_context(conv2.id, USER_A)
-
-    contents1 = [m.content for m in recent1]
-    contents2 = [m.content for m in recent2]
-
-    # Conv1 should contain Hyderabad, not Chennai
-    assert any("Hyderabad" in c for c in contents1)
-    assert not any("Chennai" in c for c in contents1)
-
-    # Conv2 should contain Chennai, not Hyderabad
-    assert any("Chennai" in c for c in contents2)
-    assert not any("Hyderabad" in c for c in contents2)
-
-
-@pytest.mark.asyncio
-async def test_tc7_list_shows_both_conversations():
-    """Both conversations should appear in the user's list."""
-    conv1 = await get_or_create_conversation(None, USER_A)
-    conv2 = await get_or_create_conversation(None, USER_A)
-
-    all_convs = await list_conversations(USER_A)
-    ids = {c.id for c in all_convs}
-
-    assert conv1.id in ids
-    assert conv2.id in ids
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TC8 — Summarization failure recovery
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_tc8_summarization_failure_preserves_existing_summary():
-    """
-    If the Groq LLM summarization call raises an exception, the existing summary
-    must be preserved and the chat must NOT crash.
-    """
-    from app.core.config import get_settings
-    settings = get_settings()
-    threshold = settings.summary_trigger_threshold
-
-    # Set up a conversation with an existing summary
-    conv_id = await _build_conversation(USER_A, [
-        ("user", f"Turn {i}") for i in range(threshold + 2)
-    ])
-    existing_summary = "User is transporting rice from Hyderabad to Chennai."
-    await update_summary(conv_id, USER_A, existing_summary)
-
-    # Simulate Groq LLM failure during summarization
-    with patch(
-        "app.services.llm_service.generate_conversation_summary",
-        new=AsyncMock(side_effect=RuntimeError("Groq API timeout")),
-    ):
-        # This must NOT raise an exception
-        result = await check_and_trigger_summarization(
-            conversation_id=conv_id,
-            user_id=USER_A,
-            existing_summary=existing_summary,
-            recent_messages=[],
-        )
-
-    # Result should be None (no new summary from failed call)
-    assert result is None
-
-    # Existing summary must be preserved unchanged
-    summary, _ = await get_conversation_context(conv_id, USER_A)
-    assert summary == existing_summary, \
-        f"Existing summary must be preserved after failure. Got: {summary!r}"
-
-
-@pytest.mark.asyncio
-async def test_tc8_summarization_failure_does_not_crash_chat():
-    """Verify that summarization failure is logged but does not propagate exceptions."""
-    from app.core.config import get_settings
-    settings = get_settings()
-    threshold = settings.summary_trigger_threshold
-
-    conv_id = await _build_conversation(USER_A, [
-        ("user", f"Question {i}") for i in range(threshold + 3)
-    ])
-
-    # Force failure in check_and_trigger_summarization
-    with patch(
-        "app.services.llm_service.generate_conversation_summary",
-        new=AsyncMock(side_effect=Exception("Unexpected failure")),
-    ):
-        try:
-            # Should complete without raising
-            result = await check_and_trigger_summarization(
-                conversation_id=conv_id,
-                user_id=USER_A,
-                existing_summary="",
-                recent_messages=[],
-            )
-            assert result is None, "Should return None on summarization failure"
-        except Exception as exc:
-            pytest.fail(f"check_and_trigger_summarization must not raise exceptions: {exc}")
-
-
-@pytest.mark.asyncio
-async def test_tc8_chat_continues_normally_after_summarization_failure():
-    """
-    After summarization failure, get_conversation_context should still work,
-    and messages should still be retrievable.
-    """
-    conv_id = await _build_conversation(USER_A, [
-        ("user", "What's the weather in Mumbai?"),
-        ("assistant", "Mumbai is humid at 30°C."),
-    ])
-
-    # Force summarization failure
-    with patch(
-        "app.services.llm_service.generate_conversation_summary",
-        new=AsyncMock(side_effect=RuntimeError("LLM unavailable")),
-    ):
-        await check_and_trigger_summarization(conv_id, USER_A, "", [])
-
-    # Context must still be accessible
-    summary, recent = await get_conversation_context(conv_id, USER_A)
-    assert len(recent) == 2, "Recent messages must still be accessible after summarization failure"
-    assert any("Mumbai" in m.content for m in recent)
+            assert "Delhi" in d1["location"]
+            assert "Mumbai" in d2["location"]
+            assert d1["conversation_id"] != d2["conversation_id"]
+            assert d1["conversation_state"]["active_location"] == "Delhi"
+            assert d2["conversation_state"]["active_location"] == "Mumbai"

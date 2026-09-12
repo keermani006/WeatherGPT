@@ -240,7 +240,7 @@ class TestAlertEvaluation:
             condition="temperature", threshold=35.0, active=True, triggered=False,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 36.0)
             )
         assert result.triggered is True
@@ -255,7 +255,7 @@ class TestAlertEvaluation:
             condition="temperature", threshold=35.0, active=True, triggered=False,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 30.0)
             )
         assert result.triggered is False
@@ -269,7 +269,7 @@ class TestAlertEvaluation:
             condition="rain_probability", threshold=70.0, active=True, triggered=False,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 80.0)
             )
         assert result.triggered is True
@@ -283,7 +283,7 @@ class TestAlertEvaluation:
             condition="wind_speed", threshold=15.0, active=True, triggered=False,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 20.0)
             )
         assert result.triggered is True
@@ -297,7 +297,7 @@ class TestAlertEvaluation:
             condition="precipitation", threshold=10.0, active=True, triggered=False,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 5.0)
             )
         assert result.triggered is False
@@ -313,7 +313,7 @@ class TestAlertEvaluation:
             triggered=False, last_triggered_at=None,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 40.0)
             )
         assert result.triggered is True
@@ -331,7 +331,7 @@ class TestAlertEvaluation:
             triggered=True, last_triggered_at=original_ts,
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 evaluate_alert_with_weather(alert, 40.0)
             )
         assert alert.last_triggered_at == original_ts  # unchanged
@@ -347,7 +347,7 @@ class TestAlertEvaluation:
             triggered=True, last_triggered_at="2026-09-08T10:00:00+00:00",
         )
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 evaluate_alert_with_weather(alert, 28.0)
             )
         assert result.triggered is False
@@ -370,7 +370,7 @@ class TestAlertEvaluation:
         with patch("app.services.alert_service.get_supabase", return_value=None), \
              patch("app.services.alert_service.get_current_weather",
                    AsyncMock(return_value=mock_weather)) as mock_call:
-            result = asyncio.get_event_loop().run_until_complete(evaluate_all_alerts())
+            result = asyncio.run(evaluate_all_alerts())
 
         assert result.evaluated == 3
         # Only 1 weather call for 3 alerts at same location
@@ -390,7 +390,7 @@ class TestAlertEvaluation:
         with patch("app.services.alert_service.get_supabase", return_value=None), \
              patch("app.services.alert_service.get_current_weather",
                    AsyncMock(side_effect=Exception("Network error"))):
-            result = asyncio.get_event_loop().run_until_complete(evaluate_all_alerts())
+            result = asyncio.run(evaluate_all_alerts())
 
         assert result.evaluated == 1
         assert result.results[0].error is not None
@@ -414,6 +414,6 @@ class TestAlertEvaluation:
                 return result
 
         with patch("app.services.alert_service.get_supabase", return_value=None):
-            result = asyncio.get_event_loop().run_until_complete(_test())
+            result = asyncio.run(_test())
 
         assert result.evaluated == 0
