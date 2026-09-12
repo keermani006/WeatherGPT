@@ -46,6 +46,13 @@ interface DisplayMessage {
 const STORAGE_KEY = "weathergpt_chat_history";
 const MAX_STORED_MESSAGES = 40;
 
+function getChatStorageKey(userId?: string | null): string {
+  if (userId) {
+    return `weathergpt_chat_history_${userId}`;
+  }
+  return "weathergpt_chat_history_guest";
+}
+
 const SUGGESTIONS = [
   "What's the weather like right now?",
   "Will it rain today?",
@@ -73,7 +80,7 @@ const CONDITION_UNITS: Record<string, string> = {
 
 export default function ChatPage() {
   const { lat, lng, name: locationName, setLocation } = useLocationStore();
-  const { isAuthenticated, loginDemo } = useAuth();
+  const { user, isLoading: isAuthLoading, isAuthenticated, loginDemo } = useAuth();
 
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -83,35 +90,62 @@ export default function ChatPage() {
   const [alertCreated, setAlertCreated] = useState<Set<number>>(new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const initialized = useRef(false);
+  const currentLoadedUserRef = useRef<string | null | undefined>(undefined);
 
-  // ── Restore messages from localStorage ─────────────────────────────────
+  // ── Restore messages from localStorage scoped to active user ────────────
   useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
+    if (isAuthLoading) return;
+
+    const currentUserId = user?.id ?? null;
+    if (currentLoadedUserRef.current === currentUserId) return;
+
+    currentLoadedUserRef.current = currentUserId;
+    const storageKey = getChatStorageKey(currentUserId);
+
+    // Clean legacy un-scoped chat history key so old messages do not bleed into accounts
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed: DisplayMessage[] = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-        }
-      }
+      localStorage.removeItem(STORAGE_KEY);
     } catch {
       // ignore
     }
-  }, []);
 
-  // ── Persist messages to localStorage on change ──────────────────────────
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        const parsed: DisplayMessage[] = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          setMessages(parsed);
+          setAlertCreated(new Set());
+          return;
+        }
+      }
+    } catch {
+      // ignore corrupt storage
+    }
+
+    setMessages([]);
+    setAlertCreated(new Set());
+  }, [user?.id, isAuthLoading]);
+
+  // ── Persist messages to localStorage for current active user ─────────────
   useEffect(() => {
-    if (!initialized.current) return;
+    if (isAuthLoading) return;
+    const currentUserId = user?.id ?? null;
+    // Do not save before user identity has finished loading/restoring
+    if (currentLoadedUserRef.current !== currentUserId) return;
+
+    const storageKey = getChatStorageKey(currentUserId);
     try {
       const toStore = messages.slice(-MAX_STORED_MESSAGES);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+      if (toStore.length > 0) {
+        localStorage.setItem(storageKey, JSON.stringify(toStore));
+      } else {
+        localStorage.removeItem(storageKey);
+      }
     } catch {
       // ignore storage quota errors
     }
-  }, [messages]);
+  }, [messages, user?.id, isAuthLoading]);
 
   // ── Auto-scroll ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -150,7 +184,13 @@ export default function ChatPage() {
   function clearChat() {
     setMessages([]);
     setAlertCreated(new Set());
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    const storageKey = getChatStorageKey(user?.id);
+    try {
+      localStorage.removeItem(storageKey);
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
   }
 
   // ── Create alert from suggestion ────────────────────────────────────────

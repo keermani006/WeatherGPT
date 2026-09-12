@@ -17,6 +17,7 @@ import {
   setAuthToken,
   ApiError,
 } from "@/lib/api";
+import { useLocationStore } from "@/lib/store";
 import type { AuthUser } from "@/lib/types";
 
 interface AuthContextType {
@@ -127,6 +128,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAuthToken(null);
       setTokenState(null);
       setUser(null);
+      try {
+        useLocationStore.getState().clearLocation();
+      } catch {
+        // ignore
+      }
       try {
         localStorage.removeItem(USER_STORAGE_KEY);
       } catch {
