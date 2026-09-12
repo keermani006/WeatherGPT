@@ -55,3 +55,12 @@ services:
         value: https://nominatim.openstreetmap.org
       - key: NOMINATIM_USER_AGENT
         value: WeatherGPT/2.0 (sih-weathergpt-backend)
+      # ── Conversational Memory ────────────────────────────────────────────
+      - key: RECENT_MESSAGE_LIMIT
+        value: "10"
+      - key: SUMMARY_TRIGGER_THRESHOLD
+        value: "12"
+      - key: MAX_CONTEXT_TOKENS
+        value: "4000"
+      - key: CONVERSATION_CACHE_TTL
+        value: "3600"
