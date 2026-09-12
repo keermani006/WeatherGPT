@@ -22,7 +22,13 @@ from groq import AsyncGroq
 
 from app.core.config import get_settings
 from app.core.resilience import cb_groq
-from app.schemas.chat import AlertSuggestion, HistoryMessage, WeatherData
+from app.schemas.chat import (
+    AlertSuggestion,
+    HistoryMessage,
+    RouteWaypoint,
+    TravelCardData,
+    WeatherData,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -47,19 +53,21 @@ You are WeatherGPT, an intelligent conversational weather assistant integrated i
 Your capabilities:
 1. Answer weather questions using the structured weather data supplied in the JSON block(s).
 2. Assist with meteorological alerts. WeatherGPT has a built-in alert system that lets users create automated threshold alerts for rain, temperature, wind, and precipitation. When a user asks to set, add, create, or notify them about weather conditions (e.g. "add an alert if it rains", "notify me if wind > 50"), ALWAYS confirm that you have prepared an alert card for them directly below your response so they can activate it with one click. NEVER say "I cannot set alerts" or "I cannot send notifications" — WeatherGPT provides the interactive alert card right in this interface!
-3. For travel, driving, logistics, and trucking questions (e.g., from City A to City B, or highway driving):
-   - Compare weather conditions at both origin and destination.
-   - Evaluate driving risks: rain, wet highways, wind, and fog.
-   - Fog risk: High relative humidity (>80%) combined with cool night temperatures and low wind (<2.5 m/s) indicates elevated fog and reduced road visibility. Advise appropriate driving precautions (fog lights, safe distance, transit timing for perishable goods).
+3. For travel, route weather, cargo transport, and logistics queries:
+   - When the user describes taking goods/crops from one location to another, transporting produce, moving equipment, or visiting another place, treat it as a journey/route weather query.
+   - Do NOT answer only with destination weather or only with origin weather. Analyze the weather along the corridor connecting origin and destination, including intermediate pass-by waypoints.
+   - If intermediate route waypoints are provided in the data, describe the conditions along the route and highlight where rain or bad weather is expected.
+   - Cargo-specific risk: If user mentions cargo (harvested rice, grain, vegetables, produce, cotton, equipment), incorporate practical protection advice. For instance, for harvested rice/grain, emphasize that the critical issue is preventing rainwater from penetrating sacks to avoid grain swelling, mold, and spoilage; advise securing heavy-duty waterproof tarpaulins and elevating sacks off the truck bed.
+   - Timing: If the user specified a departure time/date, evaluate that window. If NO departure time was provided, use the upcoming forecast and state that risk depends on departure timing — NEVER invent or assume a departure time.
+   - Never fabricate route weather. Do not make unsupported claims such as "it always rains in the afternoon" or "leave early morning to avoid rain" unless the data explicitly supports it.
 4. For agriculture, farming, crop management, and gardening questions (e.g., paddy, crops, terrace/urban gardens, pest/disease control):
    - Correlate humidity, temperature, and rain with plant health and agronomy.
    - High humidity (>70-80%) and persistent rain create high risk for fungal pathogens (e.g., blast, sheath blight, root rot, powdery mildew) and favor certain insect pests.
    - Advise on irrigation (skip watering during rain events) and spray timing (avoid applying pesticides/fertilizers right before rain to prevent runoff).
-   - Address both large-scale farm needs and urban garden needs when both locations/contexts are mentioned.
 5. Multi-location queries: When data for two locations (origin/destination or city/farm) is provided, address BOTH clearly.
 
 STRICT RULES:
-1. Base all numerical weather assessments on the provided JSON blocks (current weather, 7-day forecast, and tonight conditions). Do not fabricate numbers.
+1. Base all numerical weather assessments on the provided JSON blocks (current weather, 7-day forecast, tonight conditions, and route corridor waypoints). Do not fabricate numbers.
 2. Provide concise, clear, and highly actionable advice (typically 3-6 sentences).
 3. For dangerous weather (storms, flash floods, dense fog), prioritize user and cargo safety.
 4. You have access to conversation history — use it to give contextual, coherent responses.
@@ -193,6 +201,8 @@ async def generate_weather_response(
     destination_forecast_summary: Optional[list] = None,
     tonight_summary: Optional[dict] = None,
     destination_tonight_summary: Optional[dict] = None,
+    route_waypoints: Optional[List[RouteWaypoint]] = None,
+    travel_card: Optional[TravelCardData] = None,
 ) -> str:
     """
     Call Groq and return its answer as a plain string.
@@ -207,6 +217,8 @@ async def generate_weather_response(
         destination_forecast_summary: 7-day daily forecast summary for destination
         tonight_summary: Tonight's weather/fog/rain summary for primary location
         destination_tonight_summary: Tonight's weather/fog/rain summary for destination
+        route_waypoints: Intermediate pass-by places with weather along transit corridor
+        travel_card: Structured Travel Weather Card data
     """
     max_len = settings.max_message_length
     if len(user_question) > max_len:
@@ -222,6 +234,38 @@ async def generate_weather_response(
     else:
         weather_context = _weather_block(weather_data, "Primary weather", forecast_summary, tonight_summary)
 
+    if route_waypoints:
+        wp_data = [
+            {
+                "pass_by_stop": wp.name,
+                "distance_from_origin_km": wp.distance_km,
+                "temperature_c": wp.weather.temperature,
+                "condition": wp.weather.condition,
+                "rain_probability_pct": wp.weather.rain_probability,
+                "humidity_pct": wp.weather.humidity,
+                "wind_speed_ms": wp.weather.wind_speed,
+            }
+            for wp in route_waypoints
+        ]
+        weather_context += (
+            f"\n\nIntermediate Route Corridor (pass-by waypoints along transit road):\n"
+            f"```json\n{json.dumps(wp_data, indent=2)}\n```"
+        )
+
+    travel_card_note = ""
+    if travel_card:
+        travel_card_note = (
+            f"\n\n[System Note: A dedicated Travel Weather Card is displayed to the user with the following validated data:\n"
+            f"- Route: {travel_card.origin} → {travel_card.destination}\n"
+            f"- Overall Risk Level: {travel_card.overall_risk} ({travel_card.risk_summary})\n"
+            f"- Route Weather: {travel_card.route_weather_summary}\n"
+            f"- Cargo: {travel_card.cargo or 'None'}\n"
+            f"- Cargo Advice: {travel_card.cargo_risk_advice or 'N/A'}\n"
+            f"- Timing: {travel_card.timing_note}\n"
+            f"- Recommendation: {travel_card.recommendation}\n"
+            f"Provide a natural-language response supporting this Travel Weather Card. Address the entire journey, cargo protection, and realistic conditions without inventing times or unsupported claims.]"
+        )
+
     alert_note = ""
     if alert_suggestion:
         alert_note = (
@@ -230,7 +274,7 @@ async def generate_weather_response(
             f"Confirm you have prepared the alert card below for them to review and create with one click, and summarize current weather.]"
         )
 
-    user_content = f"{weather_context}{alert_note}\n\nUser question: {user_question}"
+    user_content = f"{weather_context}{alert_note}{travel_card_note}\n\nUser question: {user_question}"
 
     client = _get_groq_client()
     history_messages = _build_history_messages(history)

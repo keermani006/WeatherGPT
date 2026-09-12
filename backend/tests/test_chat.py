@@ -449,3 +449,150 @@ class TestChatEndpoint:
         resp = client.get("/healthz")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
+
+
+class TestImplicitTravelIntent:
+    """Test suite for implicit travel intent detection and Travel Weather Card."""
+
+    def test_implicit_rice_crop_transport_detection(self):
+        from app.services.location_service import (
+            detect_cargo,
+            detect_departure_timing,
+            extract_route_info,
+        )
+
+        msg = (
+            "I have a rice crop which is harvested. I want to take it to Chennai to sell the crop. "
+            "Is there any chance of rain during my travel?"
+        )
+        orig, dest = extract_route_info(msg)
+        assert orig is None
+        assert dest == "Chennai"
+
+        cargo = detect_cargo(msg)
+        assert cargo == "Harvested Rice / Paddy"
+
+        timing = detect_departure_timing(msg)
+        assert timing is None  # User did not provide explicit departure time
+
+    def test_vegetables_delivery_from_to_detection(self):
+        from app.services.location_service import (
+            detect_cargo,
+            detect_departure_timing,
+            extract_route_info,
+        )
+
+        msg = "I have vegetables in my truck and need to deliver them from Vijayawada to Bengaluru. Is the weather okay?"
+        orig, dest = extract_route_info(msg)
+        assert orig == "Vijayawada"
+        assert dest == "Bengaluru"
+
+        cargo = detect_cargo(msg)
+        assert cargo == "Fresh Vegetables"
+
+    def test_plain_location_query_not_travel(self):
+        from app.services.location_service import extract_route_info
+        msg = "Will it rain in Chennai tomorrow?"
+        orig, dest = extract_route_info(msg)
+        assert orig is None
+        assert dest is None
+
+    def test_implicit_travel_endpoint_returns_travel_card(self):
+        from app.schemas.chat import RouteWaypoint
+
+        msg = (
+            "I have a rice crop which is harvested. I want to take it to Chennai to sell the crop. "
+            "Is there any chance of rain during my travel?"
+        )
+
+        orig_resolved = ResolvedLocation(name="Hyderabad", latitude=17.38, longitude=78.48, source="gps")
+        dest_loc = (13.08, 80.27, "Chennai")
+
+        wp_weather = WeatherData(
+            location="Ongole",
+            temperature=29.0,
+            feels_like=33.0,
+            condition="Moderate Rain",
+            humidity=80,
+            wind_speed=4.0,
+            rain_probability=55.0,
+        )
+
+        with (
+            patch("app.api.routes.chat.resolve_location", AsyncMock(return_value=orig_resolved)),
+            patch("app.api.routes.chat.geocode_location", AsyncMock(return_value=dest_loc)),
+            patch("app.api.routes.chat.get_weather", AsyncMock(return_value=_MOCK_WEATHER)),
+            patch(
+                "app.api.routes.chat.get_route_waypoints",
+                AsyncMock(return_value=[{"name": "Ongole", "latitude": 15.5, "longitude": 80.05, "distance_km": 300.0}]),
+            ),
+            patch("app.api.routes.chat.generate_weather_response", AsyncMock(return_value="Route weather evaluated.")),
+        ):
+            resp = client.post(
+                "/api/v1/chat",
+                json={"message": msg, "latitude": 17.38, "longitude": 78.48},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["travel_card"] is not None
+        tc = data["travel_card"]
+        assert tc["origin"] == "Chennai" or "Hyderabad" in tc["origin"] or "Chennai" in tc["destination"]
+        assert tc["cargo"] == "Harvested Rice / Paddy"
+        assert "waterproof" in tc["cargo_risk_advice"].lower()
+        assert "departure timing" in tc["timing_note"].lower()
+        assert tc["overall_risk"] in ("Low", "Moderate", "High")
+        assert tc["recommendation"] is not None
+
+    def test_drive_to_pune_departure_timing_and_route_extraction(self):
+        from app.services.location_service import detect_departure_timing, extract_route_info
+
+        # 1. Exact clock time with modifier
+        orig, dest = extract_route_info("I want to drive to pune at round 6 in evening")
+        assert dest == "Pune"
+        assert detect_departure_timing("I want to drive to pune at round 6 in evening") == "Around 6:00 PM (Evening)"
+
+        # 2. Immediate / now
+        assert detect_departure_timing("I want to drive to pune now") == "Now (Current Time)"
+        orig, dest = extract_route_info("I want to drive to pune now")
+        assert dest == "Pune"
+
+        # 3. Period (evening / night)
+        assert detect_departure_timing("drive to pune in evening") == "This Evening"
+        assert detect_departure_timing("drive to pune evening") == "This Evening"
+        assert detect_departure_timing("drive to pune at night") == "Tonight"
+        assert detect_departure_timing("travel to pune tonight") == "Tonight"
+
+        # 4. Standard clock time
+        assert detect_departure_timing("drive to pune at 6pm") == "At 6:00 PM"
+        assert detect_departure_timing("drive to pune around 6:30 pm") == "Around 6:30 PM"
+        assert detect_departure_timing("drive to pune in 2 hours") == "In 2 Hours"
+
+    def test_endpoint_drive_to_pune_at_round_6_in_evening(self):
+        msg = "I want to drive to pune at round 6 in evening"
+        orig_resolved = ResolvedLocation(name="Chennai Corporation", latitude=13.0827, longitude=80.2707, source="gps")
+        dest_loc = (18.5204, 73.8567, "Pune")
+
+        with (
+            patch("app.api.routes.chat.resolve_location", AsyncMock(return_value=orig_resolved)),
+            patch("app.api.routes.chat.geocode_location", AsyncMock(return_value=dest_loc)),
+            patch("app.api.routes.chat.get_weather", AsyncMock(return_value=_MOCK_WEATHER)),
+            patch(
+                "app.api.routes.chat.get_route_waypoints",
+                AsyncMock(return_value=[{"name": "Solapur", "latitude": 17.68, "longitude": 75.9, "distance_km": 600.0}]),
+            ),
+            patch("app.api.routes.chat.generate_weather_response", AsyncMock(return_value="Route weather safe.")),
+        ):
+            resp = client.post(
+                "/api/v1/chat",
+                json={"message": msg, "latitude": 13.0827, "longitude": 80.2707},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["travel_card"] is not None
+        assert data["travel_card"]["destination"] == "Pune"
+        assert data["travel_card"]["departure_timing"] == "Around 6:00 PM (Evening)"
+        assert "planned departure: Around 6:00 PM (Evening)" in data["travel_card"]["timing_note"]
+
+

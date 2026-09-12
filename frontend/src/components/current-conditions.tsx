@@ -5,8 +5,8 @@ import { useCurrentWeather } from "@/lib/hooks";
 import { InlineError } from "@/components/inline-error";
 
 export function CurrentConditions() {
-  const { lat, lng } = useLocationStore();
-  const { data, error, isLoading } = useCurrentWeather(lat, lng);
+  const { lat, lng, name } = useLocationStore();
+  const { data, error, isLoading } = useCurrentWeather(lat, lng, name);
 
   if (lat === null || lng === null) {
     return (

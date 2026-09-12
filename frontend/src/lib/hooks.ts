@@ -14,12 +14,12 @@ import {
 } from "@/lib/api";
 
 /** Current conditions — enabled only when we have coordinates. */
-export function useCurrentWeather(lat: number | null, lng: number | null) {
+export function useCurrentWeather(lat: number | null, lng: number | null, locationName?: string | null) {
   const rLat = lat !== null ? Math.round(lat * 100) / 100 : null;
   const rLng = lng !== null ? Math.round(lng * 100) / 100 : null;
   return useQuery({
-    queryKey: ["weather", "current", rLat, rLng],
-    queryFn: () => getCurrentWeather({ lat: lat!, lng: lng! }),
+    queryKey: ["weather", "current", rLat, rLng, locationName],
+    queryFn: () => getCurrentWeather({ lat: lat!, lng: lng!, location_name: locationName ?? undefined }),
     enabled: lat !== null && lng !== null,
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
@@ -28,14 +28,14 @@ export function useCurrentWeather(lat: number | null, lng: number | null) {
 }
 
 /** Hourly forecast (next 24 h) — date = today. */
-export function useHourlyWeather(lat: number | null, lng: number | null) {
+export function useHourlyWeather(lat: number | null, lng: number | null, locationName?: string | null) {
   const rLat = lat !== null ? Math.round(lat * 100) / 100 : null;
   const rLng = lng !== null ? Math.round(lng * 100) / 100 : null;
   const today = new Date().toISOString().split("T")[0];
   return useQuery({
-    queryKey: ["weather", "hourly", rLat, rLng, today],
+    queryKey: ["weather", "hourly", rLat, rLng, today, locationName],
     queryFn: () =>
-      getHourlyWeather({ lat: lat!, lng: lng!, date: today }),
+      getHourlyWeather({ lat: lat!, lng: lng!, date: today, location_name: locationName ?? undefined }),
     enabled: lat !== null && lng !== null,
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
@@ -44,12 +44,12 @@ export function useHourlyWeather(lat: number | null, lng: number | null) {
 }
 
 /** 7-day forecast — days hardcoded to 7. */
-export function useForecast(lat: number | null, lng: number | null) {
+export function useForecast(lat: number | null, lng: number | null, locationName?: string | null) {
   const rLat = lat !== null ? Math.round(lat * 100) / 100 : null;
   const rLng = lng !== null ? Math.round(lng * 100) / 100 : null;
   return useQuery({
-    queryKey: ["weather", "forecast", rLat, rLng],
-    queryFn: () => getForecast({ lat: lat!, lng: lng!, days: 7 }),
+    queryKey: ["weather", "forecast", rLat, rLng, locationName],
+    queryFn: () => getForecast({ lat: lat!, lng: lng!, days: 7, location_name: locationName ?? undefined }),
     enabled: lat !== null && lng !== null,
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,

@@ -7,6 +7,7 @@ Unit and integration tests for /api/v1/weather/* endpoints:
   - GET /api/v1/weather/hourly
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
@@ -157,10 +158,15 @@ class TestForecast:
 
 class TestHourlyForecast:
     def test_hourly_valid_date(self):
-        today_str = "2026-09-08"
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        mock_resp = HourlyResponse(
+            location=_MOCK_LOCATION_INFO,
+            date=today_str,
+            hourly=_MOCK_HOURLY_RESP.hourly,
+        )
         with (
             patch("app.api.routes.weather.reverse_geocode", AsyncMock(return_value="Hyderabad")),
-            patch("app.api.routes.weather.get_hourly_forecast", AsyncMock(return_value=_MOCK_HOURLY_RESP)),
+            patch("app.api.routes.weather.get_hourly_forecast", AsyncMock(return_value=mock_resp)),
         ):
             resp = client.get(f"/api/v1/weather/hourly?latitude=17.385&longitude=78.4867&date={today_str}")
         assert resp.status_code == 200

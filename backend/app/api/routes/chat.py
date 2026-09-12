@@ -26,11 +26,25 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.core.config import get_settings
 from app.core.limiter import limiter
 from app.core.resilience import ServiceUnavailableError
-from app.schemas.chat import AlertSuggestion, ChatRequest, ChatResponse, WeatherData
+from app.schemas.chat import (
+    AlertSuggestion,
+    ChatRequest,
+    ChatResponse,
+    RouteWaypoint,
+    TravelCardData,
+    WeatherData,
+)
 from app.services.llm_service import build_alert_suggestion, generate_weather_response
 from app.services.location_service import (
+    compute_travel_risk,
+    detect_cargo,
+    detect_departure_timing,
+    extract_location_from_message,
+    extract_locations_from_message,
+    extract_route_info,
     extract_travel_destination,
     geocode_location,
+    get_route_waypoints,
     resolve_location,
 )
 from app.services.weather_service import get_weather
@@ -202,9 +216,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     # ── 4. Resolve secondary/destination location (if any) ───────────────────
     secondary_query = None
-    if route_dest:
+    if route_dest and route_dest.lower() not in resolved.name.lower() and resolved.name.lower() not in route_dest.lower():
         secondary_query = route_dest
-    elif travel_dest_name:
+    elif travel_dest_name and travel_dest_name.lower() not in resolved.name.lower() and resolved.name.lower() not in travel_dest_name.lower():
         secondary_query = travel_dest_name
     elif len(msg_locs) >= 2 and msg_locs[1].lower() not in resolved.name.lower():
         secondary_query = msg_locs[1]
@@ -255,6 +269,77 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             logger.info("Secondary weather fetched for '%s'", destination_resolved.name)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not fetch secondary weather: %s", exc)
+
+    # ── 5b. Fetch route waypoints & corridor weather for travel queries ────────
+    route_waypoints: Optional[List[RouteWaypoint]] = None
+    if (
+        destination_resolved
+        and resolved.name.lower() not in destination_resolved.name.lower()
+        and destination_resolved.name.lower() not in resolved.name.lower()
+    ):
+        try:
+            raw_wps = await get_route_waypoints(
+                orig_lat=resolved.latitude,
+                orig_lon=resolved.longitude,
+                dest_lat=destination_resolved.latitude,
+                dest_lon=destination_resolved.longitude,
+            )
+            if raw_wps:
+                wp_weather_tasks = [
+                    get_weather(
+                        latitude=wp["latitude"],
+                        longitude=wp["longitude"],
+                        location_name=wp["name"],
+                        for_tomorrow=for_tomorrow,
+                    )
+                    for wp in raw_wps
+                ]
+                wp_weathers = await asyncio.gather(*wp_weather_tasks, return_exceptions=True)
+                route_waypoints = []
+                for wp, w_res in zip(raw_wps, wp_weathers):
+                    if isinstance(w_res, WeatherData):
+                        route_waypoints.append(
+                            RouteWaypoint(
+                                name=wp["name"],
+                                latitude=wp["latitude"],
+                                longitude=wp["longitude"],
+                                distance_km=wp.get("distance_km"),
+                                weather=w_res,
+                            )
+                        )
+                if not route_waypoints:
+                    route_waypoints = None
+                else:
+                    logger.info("Resolved %d intermediate route waypoints with weather", len(route_waypoints))
+        except Exception as wp_err:  # noqa: BLE001
+            logger.warning("Failed fetching route waypoints: %s", wp_err)
+
+    # ── 5c. Detect cargo, timing & compute Travel Weather Card ─────────────────
+    travel_card: Optional[TravelCardData] = None
+    cargo = detect_cargo(body.message)
+    departure_timing = detect_departure_timing(body.message)
+
+    if destination_resolved and destination_weather:
+        try:
+            travel_card = compute_travel_risk(
+                origin_name=resolved.name,
+                origin_weather=weather_data,
+                destination_name=destination_resolved.name,
+                destination_weather=destination_weather,
+                waypoints=route_waypoints or [],
+                cargo=cargo,
+                departure_timing=departure_timing,
+            )
+            logger.info(
+                "Travel Weather Card created | %s -> %s | Risk=%s | Cargo=%s | Timing=%s",
+                travel_card.origin,
+                travel_card.destination,
+                travel_card.overall_risk,
+                travel_card.cargo,
+                travel_card.departure_timing,
+            )
+        except Exception as tc_err:  # noqa: BLE001
+            logger.warning("Failed to compute TravelCardData: %s", tc_err)
 
     # ── 6. Fetch 7-day forecast and tonight condition details ────────────────
     from app.services.weather_service import get_forecast
@@ -391,6 +476,8 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             destination_forecast_summary=destination_forecast_summary,
             tonight_summary=tonight_summary,
             destination_tonight_summary=destination_tonight_summary,
+            route_waypoints=route_waypoints,
+            travel_card=travel_card,
         )
     except httpx.TimeoutException:
         logger.warning("LLM timed out; returning structured fallback for '%s'", resolved.name)
@@ -401,8 +488,13 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     elapsed = (time.perf_counter() - start) * 1000
     logger.info(
-        "Request completed in %.1f ms | location='%s' | travel=%s | alert=%s | created=%s",
-        elapsed, resolved.name, destination_resolved is not None, alert_suggestion is not None, created_alert is not None,
+        "Request completed in %.1f ms | location='%s' | travel=%s | waypoints=%d | alert=%s | created=%s",
+        elapsed,
+        resolved.name,
+        destination_resolved is not None,
+        len(route_waypoints) if route_waypoints else 0,
+        alert_suggestion is not None,
+        created_alert is not None,
     )
 
     return ChatResponse(
@@ -410,6 +502,8 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         location=resolved.name,
         weather_data=weather_data,
         destination_weather=destination_weather,
+        route_waypoints=route_waypoints,
+        travel_card=travel_card,
         alert_suggestion=alert_suggestion,
         created_alert=created_alert,
     )

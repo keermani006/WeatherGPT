@@ -15,9 +15,10 @@ import Link from "next/link";
 import { useLocationStore } from "@/lib/store";
 import { sendChatMessage, createAlert, getCurrentWeather, ApiError } from "@/lib/api";
 import { WeatherWidget } from "@/components/weather-widget";
+import { RouteItineraryCard } from "@/components/route-itinerary-card";
 import { PinIcon } from "@/components/icons";
 import { useAuth } from "@/lib/auth-context";
-import type { ChatMessage, WeatherData } from "@/lib/types";
+import type { ChatMessage, RouteWaypoint, TravelCardData, WeatherData } from "@/lib/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ interface DisplayMessage {
   content: string;
   weather_data?: WeatherData;
   destination_weather?: WeatherData;
+  route_waypoints?: RouteWaypoint[];
+  travel_card?: TravelCardData;
   alert_suggestion?: AlertSuggestion;
 }
 
@@ -236,7 +239,9 @@ export default function ChatPage() {
           role: "assistant",
           content: response.answer,
           weather_data: response.weather_data ?? undefined,
-          destination_weather: (response as any).destination_weather ?? undefined,
+          destination_weather: response.destination_weather ?? undefined,
+          route_waypoints: response.route_waypoints ?? undefined,
+          travel_card: response.travel_card ?? undefined,
           alert_suggestion: effectiveSuggestion,
         },
       ]);
@@ -360,17 +365,36 @@ export default function ChatPage() {
                     <div className="max-w-[90%] space-y-3">
                       <p className="font-sans text-sm text-ink leading-relaxed">{msg.content}</p>
 
-                      {/* Primary weather widget */}
-                      {msg.weather_data && <WeatherWidget data={msg.weather_data} />}
+                      {/* Primary weather widget (only if not a route travel query) */}
+                      {!msg.travel_card && msg.weather_data && <WeatherWidget data={msg.weather_data} />}
 
-                      {/* Destination weather widget (travel queries) */}
-                      {msg.destination_weather && (
-                        <div className="space-y-1">
-                          <span className="font-mono text-[10px] uppercase tracking-widest text-ink/40">
-                            Destination
-                          </span>
-                          <WeatherWidget data={msg.destination_weather} />
-                        </div>
+                      {/* Travel Weather Card (route/transit queries) */}
+                      {msg.travel_card ? (
+                        <RouteItineraryCard
+                          travelCard={msg.travel_card}
+                          originName={msg.weather_data?.location || "Origin"}
+                          originWeather={msg.weather_data}
+                          destinationName={msg.destination_weather?.location || "Destination"}
+                          destinationWeather={msg.destination_weather}
+                          waypoints={msg.route_waypoints || []}
+                        />
+                      ) : msg.route_waypoints && msg.route_waypoints.length > 0 ? (
+                        <RouteItineraryCard
+                          originName={msg.weather_data?.location || "Origin"}
+                          originWeather={msg.weather_data}
+                          destinationName={msg.destination_weather?.location || "Destination"}
+                          destinationWeather={msg.destination_weather}
+                          waypoints={msg.route_waypoints}
+                        />
+                      ) : (
+                        msg.destination_weather && (
+                          <div className="space-y-1">
+                            <span className="font-mono text-[10px] uppercase tracking-widest text-ink/40">
+                              Destination
+                            </span>
+                            <WeatherWidget data={msg.destination_weather} />
+                          </div>
+                        )
                       )}
 
                       {/* Alert suggestion / active card */}

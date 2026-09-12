@@ -100,6 +100,32 @@ class AlertSuggestion(BaseModel):
     description: str = Field(description="Short human explanation, e.g. 'Alert when rain > 70% in Delhi'")
 
 
+# ── Route Waypoints & Travel Weather Card ────────────────────────────────────
+
+class RouteWaypoint(BaseModel):
+    """An intermediate pass-by location along a travel route with its weather."""
+    name: str = Field(description="Name of the waypoint / transit city")
+    latitude: float
+    longitude: float
+    distance_km: Optional[float] = Field(default=None, description="Distance from origin in kilometers")
+    weather: WeatherData = Field(description="Weather conditions at this waypoint")
+
+
+class TravelCardData(BaseModel):
+    """Structured data for Travel Weather Card returned on route/transit queries."""
+    origin: str = Field(description="Origin city or location")
+    destination: str = Field(description="Destination city or location")
+    overall_risk: str = Field(description="Low | Moderate | High")
+    risk_summary: str = Field(description="Concise rationale for the overall risk level")
+    route_weather_summary: str = Field(description="Summary of weather along key sections")
+    departure_timing: Optional[str] = Field(default=None, description="User departure time/date if specified")
+    timing_note: str = Field(description="Timing evaluation or disclaimer when departure time is not provided")
+    cargo: Optional[str] = Field(default=None, description="Identified cargo or goods being moved (e.g., Harvested Rice)")
+    cargo_risk_advice: Optional[str] = Field(default=None, description="Cargo-specific risk and protection instructions")
+    recommendation: str = Field(description="Practical travel recommendation based on actual route forecast")
+    waypoints: List[RouteWaypoint] = Field(default_factory=list, description="Waypoints with weather conditions")
+
+
 # ── Response ─────────────────────────────────────────────────────────────────
 
 class ChatResponse(BaseModel):
@@ -114,6 +140,14 @@ class ChatResponse(BaseModel):
     destination_weather: Optional[WeatherData] = Field(
         default=None,
         description="Weather at the destination for travel queries.",
+    )
+    route_waypoints: Optional[List[RouteWaypoint]] = Field(
+        default=None,
+        description="Intermediate waypoints with weather conditions along the travel route.",
+    )
+    travel_card: Optional[TravelCardData] = Field(
+        default=None,
+        description="Dedicated Travel Weather Card data for travel/route queries.",
     )
     alert_suggestion: Optional[AlertSuggestion] = Field(
         default=None,

@@ -4,6 +4,8 @@
  * Contract: d:\Projects\SIH\backend\API_CONTRACT.md
  * ────────────────────────────────────────────── */
 
+import type { RouteWaypoint, TravelCardData } from "./types";
+
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
 
@@ -171,9 +173,14 @@ export function getHourlyWeather(params: {
   lat: number;
   lng: number;
   date: string;
+  location_name?: string;
 }) {
   return request<{
-    location: { name: string; latitude: number; longitude: number };
+    location: {
+      latitude: number;
+      longitude: number;
+      name: string;
+    };
     date: string;
     hourly: Array<{
       time: string;
@@ -183,10 +190,11 @@ export function getHourlyWeather(params: {
       wind_speed: number;
     }>;
   }>(
-    `/api/v1/weather/hourly${qs({
-      latitude: params.lat,
-      longitude: params.lng,
+    `/api/v1/weather/hourly?${new URLSearchParams({
+      latitude: String(params.lat),
+      longitude: String(params.lng),
       date: params.date,
+      ...(params.location_name ? { location_name: params.location_name } : {}),
     })}`
   );
 }
@@ -233,6 +241,8 @@ export function sendChatMessage(params: {
       rainfall?: number;
       forecast_date?: string;
     };
+    route_waypoints?: RouteWaypoint[];
+    travel_card?: TravelCardData;
     alert_suggestion?: {
       location_name: string;
       latitude: number;

@@ -7,8 +7,8 @@ import { InlineError } from "@/components/inline-error";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export function ForecastList() {
-  const { lat, lng } = useLocationStore();
-  const { data, error, isLoading } = useForecast(lat, lng);
+  const { lat, lng, name } = useLocationStore();
+  const { data, error, isLoading } = useForecast(lat, lng, name);
 
   if (lat === null || lng === null) return null;
 

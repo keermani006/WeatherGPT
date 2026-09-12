@@ -106,10 +106,37 @@ export interface WeatherData {
   forecast_date?: string;
 }
 
+export interface RouteWaypoint {
+  name: string;
+  latitude: number;
+  longitude: number;
+  distance_km?: number;
+  weather: WeatherData;
+}
+
+export interface TravelCardData {
+  origin: string;
+  destination: string;
+  overall_risk: "Low" | "Moderate" | "High";
+  risk_summary: string;
+  route_weather_summary: string;
+  departure_timing?: string | null;
+  timing_note: string;
+  cargo?: string | null;
+  cargo_risk_advice?: string | null;
+  recommendation: string;
+  waypoints: RouteWaypoint[];
+}
+
 export interface ChatResponse {
   answer: string; // real backend uses "answer" not "reply"
   location: string;
   weather_data?: WeatherData;
+  destination_weather?: WeatherData;
+  route_waypoints?: RouteWaypoint[];
+  travel_card?: TravelCardData;
+  alert_suggestion?: any;
+  created_alert?: any;
 }
 
 // ── 6 & 7. POST/GET /api/v1/alerts ───────────

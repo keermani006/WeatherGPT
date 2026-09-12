@@ -9,6 +9,7 @@ FastAPI endpoints for direct meteorological data:
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -39,10 +40,11 @@ router = APIRouter(prefix="/weather", tags=["Weather"])
 async def current_weather_endpoint(
     latitude: float = Query(..., ge=-90.0, le=90.0, description="Latitude coordinate."),
     longitude: float = Query(..., ge=-180.0, le=180.0, description="Longitude coordinate."),
+    location_name: Optional[str] = Query(None, description="Pre-resolved human-friendly location name."),
 ):
     try:
-        location_name = await reverse_geocode(latitude, longitude)
-        return await get_current_weather(latitude, longitude, location_name)
+        resolved_name = location_name.strip() if location_name and location_name.strip() else await reverse_geocode(latitude, longitude)
+        return await get_current_weather(latitude, longitude, resolved_name)
     except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
         logger.error("Open-Meteo current weather error: %s", exc)
         raise HTTPException(
@@ -70,10 +72,11 @@ async def forecast_endpoint(
     latitude: float = Query(..., ge=-90.0, le=90.0, description="Latitude coordinate."),
     longitude: float = Query(..., ge=-180.0, le=180.0, description="Longitude coordinate."),
     days: int = Query(7, ge=1, le=16, description="Number of forecast days (1-16)."),
+    location_name: Optional[str] = Query(None, description="Pre-resolved human-friendly location name."),
 ):
     try:
-        location_name = await reverse_geocode(latitude, longitude)
-        return await get_forecast(latitude, longitude, location_name, days=days)
+        resolved_name = location_name.strip() if location_name and location_name.strip() else await reverse_geocode(latitude, longitude)
+        return await get_forecast(latitude, longitude, resolved_name, days=days)
     except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
         logger.error("Open-Meteo forecast error: %s", exc)
         raise HTTPException(
@@ -101,6 +104,7 @@ async def hourly_forecast_endpoint(
     latitude: float = Query(..., ge=-90.0, le=90.0, description="Latitude coordinate."),
     longitude: float = Query(..., ge=-180.0, le=180.0, description="Longitude coordinate."),
     date: str = Query(..., description="Target date in YYYY-MM-DD format."),
+    location_name: Optional[str] = Query(None, description="Pre-resolved human-friendly location name."),
 ):
     # Validate date format and forecast range
     try:
@@ -120,14 +124,14 @@ async def hourly_forecast_endpoint(
             detail={
                 "error": {
                     "code": "DATE_OUT_OF_RANGE",
-                    "message": f"Requested date must be between {today.isoformat()} and {max_forecast_date.isoformat()}.",
+                    "message": f"Requested date must be between {(today - timedelta(days=2)).isoformat()} and {max_forecast_date.isoformat()}.",
                 }
             },
         )
 
     try:
-        location_name = await reverse_geocode(latitude, longitude)
-        return await get_hourly_forecast(latitude, longitude, location_name, date_str=date)
+        resolved_name = location_name.strip() if location_name and location_name.strip() else await reverse_geocode(latitude, longitude)
+        return await get_hourly_forecast(latitude, longitude, resolved_name, date_str=date)
     except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
         logger.error("Open-Meteo hourly forecast error: %s", exc)
         raise HTTPException(

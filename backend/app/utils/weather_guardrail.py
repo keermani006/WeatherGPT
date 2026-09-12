@@ -1,25 +1,19 @@
 """
-app/utils/weather_guardrail.py
+weather_guardrail.py — Lightweight, regex-based check to verify if a user's
+chat message is weather-related before calling the LLM.
 
-Single responsibility: decide whether a user message is weather-related.
-
-Two-layer approach:
-  1. Hard-reject prompt-injection / jailbreak attempts (always first).
-  2. Keyword match against a curated weather vocabulary.
-     — Ambiguous single words (today, hot, cool, sky …) only pass
-       if they appear alongside a second weather signal or a place name
-       pattern, so "What's hot on Netflix?" doesn't slip through.
-
-The function `is_weather_related(message)` is the only public interface.
+Prevents prompt-injection / jailbreak attempts and irrelevant queries
+from burning LLM API tokens.
 """
 
 import re
 
 # ---------------------------------------------------------------------------
-# Layer 1 — Prompt-injection / jailbreak rejection patterns
+# Layer 1 — Prompt-injection, jailbreak & non-weather task rejection patterns
 # ---------------------------------------------------------------------------
 
 _INJECTION_PATTERNS: list[str] = [
+    # Jailbreaks and prompt injections
     r"ignore\s+(your\s+)?(previous\s+|all\s+)?(instructions?|rules?|prompts?|guidelines?)",
     r"ignore\s+the\s+\w+(\s+\w+)?\s+(data|context|prompt)",
     r"forget\s+(your\s+)?(instructions?|rules?)",
@@ -38,6 +32,16 @@ _INJECTION_PATTERNS: list[str] = [
     r"new\s+persona",
     r"without\s+(any\s+)?(restriction|filter|limit)",
     r"tell\s+me\s+(your\s+)?(prompt|secret|api\s+key)",
+    # Programming, coding, and development tasks
+    r"\b(?:write|generate|debug|fix|create|show)\b.*?\b(?:code|program|script|function|python|java|javascript|cpp|c\+\+|html|css|sql|app|bot|api)\b",
+    r"\b(?:python|javascript|typescript|c\+\+|java|golang|rust|php)\s+(?:code|script|program|function|class)\b",
+    r"\bwrite\s+(?:me\s+)?(?:a\s+)?(?:python|java|javascript|c\+\+|code|script|program|function)\b",
+    # General non-weather off-topic requests
+    r"\b(?:tell\s+me\s+a\s+)?joke\b",
+    r"\briddle\b",
+    r"\bwrite\s+(?:an?\s+)?(?:essay|poem|song|story|letter|article|assignment|homework)\b",
+    r"\bwho\s+is\s+(?:the\s+)?(?:prime\s+minister|president|ceo|king|queen)\b",
+    r"\b(?:stock\s+price|cryptocurrency|bitcoin|ethereum)\b",
 ]
 
 _INJECTION_RE = [re.compile(p, re.IGNORECASE) for p in _INJECTION_PATTERNS]
@@ -79,6 +83,11 @@ _STRONG_WEATHER: list[str] = [
     "will it rain", "chance of rain", "rain probability",
     "is it going to", "going to rain", "going to snow",
     "7-day", "7 day", "weekly forecast", "10-day",
+    # Direct weather items & travel safety
+    "umbrella", "raincoat",
+    "outdoor event", "outdoor activity",
+    "drive to", "driving to", "travel to", "travelling to", "traveling to", "trip to", "road trip",
+    "safe to travel", "safe to drive", "safe to visit", "safe to go",
 ]
 
 # WEAK signals — individually ambiguous, only count in combination.
@@ -86,18 +95,22 @@ _WEAK_WEATHER: list[str] = [
     "hot", "cold", "warm", "cool", "chilly", "freezing",
     "sun", "sunny", "sunshine",
     "wind", "breeze",
-    "rain",          # alone can appear in "brain", "train", etc. — handled below
+    "rain",
     "cloud",
     "sky",
     "today", "tonight", "tomorrow", "this week", "weekend",
+    "morning", "evening", "afternoon", "night", "now",
     "this morning", "this evening", "this afternoon",
-    "umbrella", "raincoat",
+    "jacket", "coat",
     "outdoor", "outside",
     "degree",
     "condition", "conditions",
     "wear", "clothes", "outfit",
-    "picnic", "hike", "trek", "cycling", "drive", "fly", "flight",
-    "farm", "crop", "paddy", "irrigation", "harvest",
+    "picnic", "hike", "trek", "cycling", "drive", "driving", "travel", "fly", "flight",
+    "farm", "farming", "farmer", "agriculture", "crop", "crops",
+    "paddy", "cotton", "wheat", "rice", "groundnut", "maize", "chilli",
+    "seed", "seeds", "sow", "sowing", "harvest", "harvesting", "plant", "planting",
+    "grow", "growing", "irrigation", "irrigate", "soil", "spoilage", "mandi", "fertilizer",
 ]
 
 
@@ -114,18 +127,6 @@ def _weak_count(lower: str) -> int:
     return sum(1 for w in _WEAK_WEATHER if re.search(r"\b" + re.escape(w) + r"\b", lower))
 
 
-def _has_location_with_weather_context(lower: str) -> bool:
-    """
-    Check if the message pairs a location indicator with a question word
-    that implies a weather query (e.g. 'weather in Delhi', 'rain Mumbai').
-    """
-    weather_context_re = re.compile(
-        r"\b(weather|rain|forecast|temperature|climate|storm|flood|fog|wind|cloud|humid|snow)\b",
-        re.IGNORECASE,
-    )
-    return bool(weather_context_re.search(lower))
-
-
 def is_weather_related(message: str) -> bool:
     """
     Return True if *message* is a weather-related user request.
@@ -136,10 +137,6 @@ def is_weather_related(message: str) -> bool:
     3. Strong weather keyword present → True.
     4. Two or more weak weather signals → True (ambiguous but likely weather).
     5. Otherwise → False (conservative default).
-
-    IMPORTANT: This function is called BEFORE any location-bypass logic.
-    The caller in chat.py must NOT skip this check based on location detection;
-    location alone does not make a question weather-related.
     """
     if not message or not message.strip():
         return False

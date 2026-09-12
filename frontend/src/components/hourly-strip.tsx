@@ -5,8 +5,8 @@ import { useHourlyWeather } from "@/lib/hooks";
 import { InlineError } from "@/components/inline-error";
 
 export function HourlyStrip() {
-  const { lat, lng } = useLocationStore();
-  const { data, error, isLoading } = useHourlyWeather(lat, lng);
+  const { lat, lng, name } = useLocationStore();
+  const { data, error, isLoading } = useHourlyWeather(lat, lng, name);
 
   if (lat === null || lng === null) return null;
 
