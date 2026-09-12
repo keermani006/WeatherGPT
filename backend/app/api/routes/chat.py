@@ -80,13 +80,29 @@ _FORECAST_KEYWORDS = [
 _TONIGHT_KEYWORDS = ["tonight", "night", "overnight", "this evening", "late night", "fog"]
 
 # Reference indicators — follow-up patterns that signal context should be resolved
+# IMPORTANT: Only short, ambiguous messages that CANNOT stand alone as weather queries.
+# Do NOT include patterns like 'the weather', 'is it', 'will it' — those appear in
+# first-turn queries too (e.g. 'What is the weather in X?', 'Will it rain in Delhi?')
 _FOLLOW_UP_PATTERNS = [
-    r"\btomorrow\b", r"\bnext day\b",
-    r"\bthere\b", r"\bit\b", r"\bsame place\b",
-    r"\bwhat about\b", r"\bhow about\b",
-    r"\bthe crop\b", r"\bthe goods\b", r"\bthe cargo\b", r"\bthe rice\b",
-    r"\bthe weather\b", r"\bsame route\b", r"\bsame location\b",
-    r"\bwill it\b", r"\bwould it\b", r"\bis it\b",
+    # Temporal shorthand with NO location
+    r"^\s*what about tomorrow\s*\??\s*$",
+    r"^\s*how about tomorrow\s*\??\s*$",
+    r"^\s*and tomorrow\s*\??\s*$",
+    r"^\s*next day\??\s*$",
+    # Pure "what about X" / "how about X" — short follow-ups
+    r"^\s*what about\b",
+    r"^\s*how about\b",
+    r"^\s*and\s+(in\s+)?[a-z]{2,20}\??\s*$",
+    # "there" / "same place" pronoun references
+    r"\bthere\b",
+    r"\bsame place\b",
+    r"\bsame route\b",
+    r"\bsame location\b",
+    # Cargo/crop pronoun references
+    r"\bthe crop\b",
+    r"\bthe goods\b",
+    r"\bthe cargo\b",
+    r"\bthe rice\b",
 ]
 
 
@@ -141,13 +157,28 @@ def _extract_context_location(
     """
     Walk recent messages in reverse chronological order, then the summary,
     to find the most recently mentioned location.
+    User messages are searched first (most recent to oldest) to capture direct user intent
+    (including location overrides like "What about Chennai?"), followed by assistant messages,
+    then the conversation summary.
     """
-    # Search recent messages (most recent first)
+    # 1. User messages (most recent first)
     for msg in reversed(recent_messages):
-        loc = extract_location_from_message(msg.content)
-        if loc:
-            return loc
-    # Fall back to summary
+        if msg.role == "user":
+            override = _extract_location_override_from_followup(msg.content)
+            if override:
+                return override
+            loc = extract_location_from_message(msg.content)
+            if loc:
+                return loc
+
+    # 2. Assistant messages (in case location was geocoded or detected from GPS)
+    for msg in reversed(recent_messages):
+        if msg.role == "assistant":
+            loc = extract_location_from_message(msg.content)
+            if loc:
+                return loc
+
+    # 3. Fall back to summary
     if summary:
         loc = extract_location_from_message(summary)
         if loc:
@@ -164,12 +195,21 @@ def _extract_context_destination(
     to find the most recently mentioned travel destination.
     """
     for msg in reversed(recent_messages):
-        _, dest = extract_route_info(msg.content)
-        if dest:
-            return dest
-        dest = extract_travel_destination(msg.content)
-        if dest:
-            return dest
+        if msg.role == "user":
+            _, dest = extract_route_info(msg.content)
+            if dest:
+                return dest
+            dest = extract_travel_destination(msg.content)
+            if dest:
+                return dest
+    for msg in reversed(recent_messages):
+        if msg.role == "assistant":
+            _, dest = extract_route_info(msg.content)
+            if dest:
+                return dest
+            dest = extract_travel_destination(msg.content)
+            if dest:
+                return dest
     if summary:
         _, dest = extract_route_info(summary)
         if dest:
@@ -269,7 +309,14 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         )
 
     # ── 2. Guardrail ─────────────────────────────────────────────────────────
-    if not is_weather_related(body.message):
+    # Follow-up messages in an active conversation are weather-related by context
+    # even if they don't contain explicit weather keywords (e.g. "What about tomorrow?")
+    # We skip the guardrail for short follow-ups when the user has conversation history.
+    has_history = bool(body.history) or bool(body.conversation_id)
+    is_potential_followup = _is_follow_up(body.message)
+    skip_guardrail = has_history and is_potential_followup and len(body.message.strip()) < 80
+
+    if not skip_guardrail and not is_weather_related(body.message):
         logger.info("Request rejected by guardrail | message='%s'", body.message[:80])
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -310,11 +357,12 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     # ── 4. Contextual Reference Resolution ───────────────────────────────────
     #
-    # If the current message appears to be a follow-up (contains "tomorrow", "there",
-    # "what about X?", "the crop", etc.), resolve the implied location/destination
-    # from the recent conversation context before standard extraction.
+    # A follow-up is a message that:
+    #   - Has conversation history (prior turns available)
+    #   - Contains a pronoun reference OR starts with "what about" / "how about"
+    #   - Does NOT contain an explicit location name by itself (it relies on context)
     #
-    is_followup = _is_follow_up(body.message)
+    is_followup = _is_follow_up(body.message) and (has_history or bool(history_messages) or bool(conversation_summary))
     context_location: Optional[str] = None
     context_destination: Optional[str] = None
 
@@ -345,14 +393,24 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     # ── 6. Resolve primary location ──────────────────────────────────────────
     try:
-        # Use context_location to augment resolution if it's a follow-up
+        # For a genuine follow-up with no new location, suppress message extraction
+        # and use context_location instead — prevents GPS fallback.
+        # For normal queries (not follow-up), always let message extraction win.
         explicit_loc = body.location
-        if context_location and not explicit_loc:
-            explicit_loc = context_location
+        resolve_message = body.message  # default: use full message for extraction
+
+        if is_followup:
+            if context_location:
+                # Follow-up with resolved context: use that as explicit, skip message extraction
+                explicit_loc = context_location
+                resolve_message = None
+            else:
+                # Follow-up but no context found: still use message (may contain new location)
+                pass
 
         resolved = await resolve_location(
             explicit=explicit_loc,
-            message=body.message if not is_followup else None,
+            message=resolve_message,
             latitude=body.latitude,
             longitude=body.longitude,
         )
