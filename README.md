@@ -23,7 +23,7 @@
   - [3. Proactive Weather Alerts & Threshold Monitoring](#3-proactive-weather-alerts--threshold-monitoring)
   - [4. Climate Projections & Decadal Trends](#4-climate-projections--decadal-trends)
   - [5. Location Intelligence & Geocoding](#5-location-intelligence--geocoding)
-  - [6. High-Performance Caching & Resilience](#6-high-performance-caching--resilience)
+  - [6. High-Performance Redis Cloud Caching & Resilience](#6-high-performance-redis-cloud-caching--resilience)
   - [7. Authentication & User Session Isolation](#7-authentication--user-session-isolation)
 - [Tech Stack](#tech-stack)
 - [Project Directory Structure](#project-directory-structure)
@@ -144,19 +144,42 @@ The backend remains the authoritative source of truth for all meteorological mea
   - Redis-backed recent location tracking per user for instant re-queries.
   - 1-hour Redis TTL on geocoding lookups to comply with Nominatim usage policies and eliminate duplicate latency.
 
-### 6. High-Performance Caching & Resilience
-- **Redis Cloud Connection Management**:
-  - Capped connection pool (`max_connections=10`) configured specifically to prevent connection starvation on cloud serverless and free-tier Redis instances.
-  - Resilient in-memory fallback cache if Redis Cloud encounters transient network partitions.
-- **Tiered Cache Expirations**:
-  - Current Weather: 300s (5 minutes)
-  - Hourly Forecasts: 300s (5 minutes)
-  - Daily Forecasts: 600s (10 minutes)
-  - Geocoding Lookups: 3600s (1 hour)
-  - Climate Projections: 3600s (1 hour)
-  - Conversation Context: 3600s (1 hour)
+### 6. High-Performance Redis Cloud Caching & Resilience
+WeatherGPT employs a centralized **Redis Cloud** caching architecture across all domains to eliminate redundant external API requests, slash response latencies to single-digit milliseconds, and guarantee system resilience against upstream outages:
+
+- **Centralized Multi-Domain Caching (`TTLCache`)**:
+  - Replaces single-instance in-memory storage with shared Redis Cloud, guaranteeing uniform cache state across horizontally scaled backend workers without authoritative local memory dicts.
+  - **Weather Observation & Forecast Caching**: Weather data bundles (`weather_cache`) are indexed by geographic coordinates rounded to 2 decimal places (`~1.1 km` spatial resolution). Nearby queries share identical cache entries, drastically multiplying cache hit ratios.
+  - **Geocoding & Place Search Cache**: Geocode results, reverse geocode lookups, and autocomplete queries (`location_cache`) are cached for 1 hour (`3600s`), complying with Nominatim usage guidelines while reducing geocoding latency to `<5ms`.
+  - **Climate Analytics Cache**: Historical and CMIP6 climate model projections (`climate_cache`) are cached for 1 hour (`3600s`).
+  - **Conversational Memory & State Cache**: Structured conversation state, recent sliding-window messages, and rolling summaries are cached in Redis with per-conversation keys (`conv:state:{id}`, `conv:recent:{id}`, `conv:summary:{id}`) for sub-millisecond context retrieval.
+
+- **Stale-If-Error Fault Tolerance (7-Day Backup)**:
+  - On every cache write, the system atomically stores both the active TTL-bounded key and a secondary `stale:*` mirror key with a **7-day retention period** (`86,400 × 7s`).
+  - If upstream APIs (Open-Meteo or Nominatim) experience downtime, timeouts, or HTTP 429/5xx errors, WeatherGPT transparently serves the stale Redis cached data with warning logs, avoiding 502/503 errors and ensuring zero disruption for end users.
+
+- **Request Coalescing (Thundering Herd Protection)**:
+  - The `get_or_set` engine tracks in-flight asynchronous futures (`_inflight`).
+  - If dozens of concurrent users request weather or route conditions for the same city simultaneously during a weather event, only **one single upstream network request** is executed; all other requests await and read from the single Redis write.
+
+- **Centralized Atomic Rate Limiting (Redis Lua Scripting)**:
+  - Distributed token/counter rate limiting (`RATE_LIMIT_CHAT`, `RATE_LIMIT_LOCATION`, `RATE_LIMIT_ALERTS`) executed via atomic Redis Lua scripts, preventing multi-worker race conditions.
+
+- **Connection Pool Optimization & Fallbacks**:
+  - Redis connection pool is explicitly capped (`max_connections=10`) with `socket_timeout=2.0s` and `socket_connect_timeout=2.0s` to prevent connection exhaustion on cloud serverless and shared Redis tiers.
+  - Built-in graceful degradation: If Redis Cloud encounters transient network partitions, the system logs the issue and falls back gracefully rather than crashing.
+
+- **Tiered Cache TTL Summary**:
+  - **Current Weather Bundle**: `300s` (5 minutes)
+  - **Hourly Forecasts**: `300s` (5 minutes)
+  - **Daily Multi-Day Forecasts**: `600s` (10 minutes)
+  - **Nominatim Geocoding & Reverse Geocoding**: `3600s` (1 hour)
+  - **Climate Projections**: `3600s` (1 hour)
+  - **Conversational State & Memory**: `3600s` (1 hour)
+  - **Stale Fallback Data**: `604,800s` (7 days)
+
 - **Circuit Breakers & Exponential Backoff**:
-  - Configurable retries (`RETRY_MAX_ATTEMPTS=3`) and sliding-window circuit breakers (`CIRCUIT_BREAKER_THRESHOLD=5`) on upstream weather and geocoding providers.
+  - Upstream network calls are wrapped in sliding-window circuit breakers (`CIRCUIT_BREAKER_THRESHOLD=5`, `CIRCUIT_BREAKER_WINDOW=60s`) and retry loops (`RETRY_MAX_ATTEMPTS=3`) with exponential backoff.
 
 ### 7. Authentication & User Session Isolation
 - **Supabase Authentication**:
